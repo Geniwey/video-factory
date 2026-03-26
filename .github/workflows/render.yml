@@ -42,14 +42,15 @@ jobs:
               return 0 
             fi
 
-            # 🔐 EL TRUCO MEJORADO: Esperar a que el Gist esté listo y usar -i (ignore-garbage)
+            # 🔐 EL TRUCO: Blindado anti-basura y decodificado seguro
             if [[ "$url" == *"gist.githubusercontent.com"* ]]; then
               echo "🔐 Detectado Gist secreto. Extrayendo audio..."
               for i in 1 2 3; do
-                HTTP_CODE=$(curl -L -s -w "%{http_code}" -o temp.b64 "$url")
+                HTTP_CODE=$(curl -L -sS -w "%{http_code}" -o temp.b64 "$url")
                 if [ "$HTTP_CODE" = "200" ] && [ -s temp.b64 ]; then
                   echo "✅ Gist descargado. Descodificando..."
-                  cat temp.b64 | tr -d '\n\r ' | base64 -di > "$output" 2>/dev/null || true
+                  # Quitamos comillas, espacios y saltos de línea antes de decodificar
+                  cat temp.b64 | tr -d '"\n\r ' | base64 -d -i > "$output" 2>/dev/null || true
                   rm -f temp.b64
                   return 0
                 fi
@@ -96,8 +97,13 @@ jobs:
             echo "🎙️ Generando audio local con Edge-TTS..."
             TEXTO="${SCRIPT_TEXT:-Generando audio de emergencia.}"
             echo "$TEXTO" > /tmp/script.txt
-            if edge-tts --voice "es-ES-AlvaroNeural" --rate "+5%" --pitch "-3Hz" --file /tmp/script.txt --write-media temp_tts.mp3; then
+            
+            # 🔥 EL ARREGLO DE EDGE-TTS: Añadidos los signos de "=" para evitar conflictos con los números negativos
+            if edge-tts --voice "es-ES-AlvaroNeural" --rate="+5%" --pitch="-3Hz" --file /tmp/script.txt --write-media temp_tts.mp3; then
+               echo "✅ Voz de emergencia generada."
                ffmpeg -y -i temp_tts.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null || true
+            else
+               echo "❌ Falló Edge-TTS."
             fi
           fi
           
