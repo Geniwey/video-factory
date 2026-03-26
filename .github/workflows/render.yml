@@ -25,7 +25,6 @@ jobs:
           pip install --quiet openai-whisper edge-tts
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg bc file
-          
           mkdir -p ~/.fonts
           wget -q -O ~/.fonts/Montserrat-Black.ttf "https://github.com/google/fonts/raw/main/ofl/montserrat/static/Montserrat-Black.ttf" || true
           fc-cache -f
@@ -36,46 +35,16 @@ jobs:
             local raw_url="$1"
             local output="$2"
             local url=$(echo "$raw_url" | tr -d '\r\n" ' | sed 's/^undefined$//i' | sed 's/^null$//i')
-            
-            if [ -z "$url" ]; then 
-              echo "⚠️ URL vacía para $output."
-              return 0 
-            fi
-
-            # 🔐 EL TRUCO: Blindado anti-basura y decodificado seguro
-            if [[ "$url" == *"gist.githubusercontent.com"* ]]; then
-              echo "🔐 Detectado Gist secreto. Extrayendo audio..."
-              for i in 1 2 3; do
-                HTTP_CODE=$(curl -L -sS -w "%{http_code}" -o temp.b64 "$url")
-                if [ "$HTTP_CODE" = "200" ] && [ -s temp.b64 ]; then
-                  echo "✅ Gist descargado. Descodificando..."
-                  # Quitamos comillas, espacios y saltos de línea antes de decodificar
-                  cat temp.b64 | tr -d '"\n\r ' | base64 -d -i > "$output" 2>/dev/null || true
-                  rm -f temp.b64
-                  return 0
-                fi
-                echo "⏳ Gist no disponible aún (HTTP $HTTP_CODE). Reintentando en 3s..."
-                sleep 3
-              done
-              echo "❌ Falló la descarga del Gist."
-              return 0
-            fi
+            if [ -z "$url" ]; then echo "⚠️ URL vacía para $output."; return 0; fi
 
             echo "📥 Descargando $output..."
             curl -L -f -A "Mozilla/5.0" --connect-timeout 20 --max-time 120 -o "$output" "$url" 2>/dev/null || true
-            
             if [ -s "$output" ]; then
               local mime=$(file -b --mime-type "$output" 2>/dev/null || echo "unknown")
-              if [[ "$mime" == text/html* ]] || [[ "$mime" == text/plain* ]]; then
-                echo "⚠️ Enlace bloqueado (devolvió HTML). Descartando..."
-                rm -f "$output"
-              else
-                echo "✅ $output descargado correctamente."
-              fi
+              if [[ "$mime" == text/html* ]]; then rm -f "$output"; fi
             fi
             return 0
           }
-
           download_asset "${{ github.event.client_payload.audio_url }}" "audio_original"
           download_asset "${{ github.event.client_payload.video_url }}" "background_original.mp4"
           download_asset "${{ github.event.client_payload.image_url }}" "overlay_original"
@@ -84,155 +53,89 @@ jobs:
         run: |
           AUDIO_OK=false
           if [ -s "audio_original" ]; then
-            echo "🔄 Convirtiendo audio Gist a WAV..."
-            if ffmpeg -y -i audio_original -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null; then
-              AUDIO_OK=true
-              echo "✅ Audio original convertido con éxito."
-            else
-              echo "⚠️ Falló la conversión del audio original."
-            fi
+            if ffmpeg -y -i audio_original -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null; then AUDIO_OK=true; fi
           fi
           
           if [ "$AUDIO_OK" = false ]; then
-            echo "🎙️ Generando audio local con Edge-TTS..."
+            echo "🎙️ Generando audio Edge-TTS..."
             TEXTO="${SCRIPT_TEXT:-Generando audio de emergencia.}"
             echo "$TEXTO" > /tmp/script.txt
-            
-            # 🔥 EL ARREGLO DE EDGE-TTS: Añadidos los signos de "=" para evitar conflictos con los números negativos
-            if edge-tts --voice "es-ES-AlvaroNeural" --rate="+5%" --pitch="-3Hz" --file /tmp/script.txt --write-media temp_tts.mp3; then
-               echo "✅ Voz de emergencia generada."
-               ffmpeg -y -i temp_tts.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null || true
-            else
-               echo "❌ Falló Edge-TTS."
-            fi
+            edge-tts --voice "es-ES-AlvaroNeural" --rate="+5%" --pitch="-3Hz" --file /tmp/script.txt --write-media temp_tts.mp3 || true
+            ffmpeg -y -i temp_tts.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null || true
           fi
           
-          if [ ! -s "audio.wav" ]; then
-            echo "❌ Fallo grave. Creando 5s de silencio."
-            ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=mono -t 5 -c:a pcm_s16le audio.wav || true
-          fi
-          
+          if [ ! -s "audio.wav" ]; then ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=mono -t 5 -c:a pcm_s16le audio.wav || true; fi
           DURATION=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 audio.wav || echo "5")
           if ! awk "BEGIN {exit !($DURATION > 0)}"; then DURATION=5; fi
           echo "$DURATION" > /tmp/audio_duration.txt
-          echo "⏱️ Duración del audio: $DURATION"
 
       - name: Visuals Processing
         run: |
           DURATION=$(cat /tmp/audio_duration.txt)
           
-          if [ -f "overlay_original" ]; then
+          if [ -s "overlay_original" ] && ffprobe -v quiet overlay_original; then
             ffmpeg -y -i overlay_original -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" -pix_fmt rgba overlay.png 2>/dev/null || rm -f overlay.png
           fi
-          if [ ! -f "overlay.png" ]; then
-            ffmpeg -y -f lavfi -i "color=c=black:s=1080x1920:d=1" -frames:v 1 overlay.png || true
+          if [ ! -s "overlay.png" ]; then
+            ffmpeg -y -f lavfi -i "color=c=black@0:s=1080x1920:d=1,format=rgba,geq=r='0':g='0':b='0':a='clip(if(lt(Y,350), 200-Y*200/350,if(gt(Y,1550), (Y-1550)*200/370,0)),0, 220)'" -frames:v 1 overlay.png || true
           fi
           
-          if [ -f "background_original.mp4" ] && ffprobe -v quiet background_original.mp4; then
+          if [ -s "background_original.mp4" ] && ffprobe -v quiet background_original.mp4; then
             cp background_original.mp4 background.mp4
           else
-            echo "⚠️ Generando fondo animado..."
-            ffmpeg -y -f lavfi -i "color=c=0x0a0a1a:s=1080x1920:d=$DURATION,format=yuv420p,noise=alls=8:allf=t,vignette=PI/4" -c:v libx264 -preset ultrafast -t "$DURATION" background.mp4 || true
+            echo "⚠️ Generando fondo PRO..."
+            ffmpeg -y -f lavfi -i "color=c=0x0a0e27:s=1080x1920:d=${DURATION}:r=30,format=yuv420p" -c:v libx264 -preset ultrafast -crf 28 -t "$DURATION" /tmp/layer_base.mp4
+            ffmpeg -y -i /tmp/layer_base.mp4 -vf "vignette=PI/2.5:mode=backward,noise=alls=3:allf=t,eq=brightness=-0.05:contrast=1.15:saturation=0.4,zoompan=z='1+0.0008*on':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=1080x1920:fps=30" -c:v libx264 -preset fast -crf 26 -t "$DURATION" background.mp4 || true
           fi
 
       - name: Transcribe & Subtitles
         run: |
-          echo "🎙️ Usando Whisper..."
           whisper audio.wav --model small --language "${LANG_CODE}" --output_format json --word_timestamps True --output_dir . 2>/dev/null || true
           
-          echo "📝 Generando Subtítulos..."
           cat << 'EOF' > gen_subs.py
           import json, os
           try:
               with open("audio.json", "r") as f: data = json.load(f)
-              words = []
-              for seg in data.get("segments", []):
-                  for w in seg.get("words", []): words.append(w)
-              
+              words = [w for seg in data.get("segments", []) for w in seg.get("words", [])]
               ass = "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Montserrat Black,80,&H00FFFFFF,&H0000D7FF,&H00000000,&HBB000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,538,1\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
-              
-              def fmt(s):
-                  h, m, s, cs = int(s//3600), int((s%3600)//60), int(s%60), int(round((s%1)*100))
-                  return f"{h}:{m:02d}:{s:02d}.{min(cs,99):02d}"
-              
+              def fmt(s): return f"{int(s//3600)}:{int((s%3600)//60):02d}:{int(s%60):02d}.{min(int(round((s%1)*100)),99):02d}"
               for i in range(0, len(words), 3):
                   chunk = words[i:i+3]
                   if not chunk: continue
-                  st, en = fmt(chunk[0]["start"]), fmt(chunk[-1]["end"])
                   for j, cw in enumerate(chunk):
-                      w_st, w_en = fmt(cw["start"]), fmt(cw["end"])
-                      parts = []
-                      for k, w in enumerate(chunk):
-                          txt = w["word"].strip().upper().replace('{','').replace('}','')
-                          if k == j: parts.append(f"{{\\c&H0000D7FF\\fscx110\\fscy110}}{txt}{{\\c&H00FFFFFF\\fscx100\\fscy100}}")
-                          else: parts.append(txt)
-                      ass += f"Dialogue: 0,{w_st},{w_en},Default,,0,0,0,,{' '.join(parts)}\n"
-                      
+                      parts = [f"{{\\c&H0000D7FF\\fscx110\\fscy110}}{w['word'].strip().upper().replace('{','').replace('}','')}{{\\c&H00FFFFFF\\fscx100\\fscy100}}" if k==j else w["word"].strip().upper().replace('{','').replace('}','') for k, w in enumerate(chunk)]
+                      ass += f"Dialogue: 0,{fmt(cw['start'])},{fmt(cw['end'])},Default,,0,0,0,,{' '.join(parts)}\n"
               with open("subtitles.ass", "w") as f: f.write(ass)
-          except Exception as e:
-              pass
+          except Exception: pass
           EOF
-          
           python3 gen_subs.py || true
           
           if [ ! -s "subtitles.ass" ] || [ $(grep -c "^Dialogue:" subtitles.ass || echo 0) -lt 1 ]; then
-            cat << 'EOF' > subtitles.ass
-          [Script Info]
-          ScriptType: v4.00+
-          PlayResX: 1080
-          PlayResY: 1920
-          [V4+ Styles]
-          Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-          Style: Default,Montserrat,80,&H00FFFFFF,&H0000D7FF,&H00000000,&HBB000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,538,1
-          [Events]
-          Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-          Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,
-          EOF
+            echo "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Montserrat,80,&H00FFFFFF,&H0000D7FF,&H00000000,&HBB000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,538,1\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,," > subtitles.ass
           fi
 
-      - name: Render Video with FFmpeg
+      - name: Render Video
         run: |
           DURATION=$(cat /tmp/audio_duration.txt)
           SAFE_DUR=$(printf '%.2f' "$DURATION")
-          
-          echo "🎬 Montando video..."
-          ffmpeg -y -stream_loop -1 -i background.mp4 -i overlay.png -i audio.wav -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,eq=brightness=-0.15:saturation=0.8[bg];[1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,format=rgba,colorchannelmixer=aa=0.2[ov];[bg][ov]overlay=0:0[merged];[merged]ass=subtitles.ass[withsubs];[withsubs]drawbox=x=0:y=0:w='min(iw,iw*t/${SAFE_DUR})':h=8:color=0xFFD700@0.9:t=fill[final]" -map "[final]" -map 2:a -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -c:a aac -b:a 192k -ar 44100 -movflags +faststart -t "$DURATION" output.mp4 || true
-          
-          if [ ! -s "output.mp4" ]; then
-            ffmpeg -y -stream_loop -1 -i background.mp4 -i audio.wav -c:v libx264 -preset ultrafast -crf 25 -pix_fmt yuv420p -c:a aac -b:a 192k -t "$DURATION" output.mp4 || true
-          fi
+          ffmpeg -y -stream_loop -1 -i background.mp4 -i overlay.png -i audio.wav -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,eq=brightness=-0.08:saturation=0.9[bg];[1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,format=rgba,colorchannelmixer=aa=0.20[ov];[bg][ov]overlay=0:0[merged];[merged]ass=subtitles.ass[withsubs];[withsubs]drawbox=x=0:y=0:w='min(iw,iw*t/${SAFE_DUR})':h=10:color=0xFFD700@0.95:t=fill[final]" -map "[final]" -map 2:a -c:v libx264 -preset medium -crf 23 -pix_fmt yuv420p -c:a aac -b:a 192k -ar 44100 -movflags +faststart -t "$DURATION" output.mp4 || \
+          ffmpeg -y -stream_loop -1 -i background.mp4 -i audio.wav -c:v libx264 -preset ultrafast -crf 25 -pix_fmt yuv420p -c:a aac -b:a 192k -t "$DURATION" output.mp4
 
-      - name: Upload result
+      - name: Upload
         id: upload
         run: |
           VIDEO_URL=""
           for i in 1 2 3; do
-            RESULT=$(curl -f -A "Mozilla/5.0" --connect-timeout 30 --max-time 300 -F "reqtype=fileupload" -F "time=24h" -F "fileToUpload=@output.mp4" "https://litterbox.catbox.moe/resources/internals/api.php" 2>/dev/null) || RESULT=""
-            if echo "$RESULT" | grep -q "^https://"; then VIDEO_URL="$RESULT"; break; fi
+            URL=$(curl -f -A "Mozilla/5.0" --connect-timeout 30 --max-time 300 -F "reqtype=fileupload" -F "time=24h" -F "fileToUpload=@output.mp4" "https://litterbox.catbox.moe/resources/internals/api.php" 2>/dev/null || echo "")
+            if echo "$URL" | grep -q "^https://"; then VIDEO_URL="$URL"; break; fi
             sleep 10
           done
-          
-          if [ -z "$VIDEO_URL" ]; then
-            RESULT=$(curl -f -A "Mozilla/5.0" --connect-timeout 30 --max-time 300 -F "reqtype=fileupload" -F "fileToUpload=@output.mp4" "https://catbox.moe/user/api.php" 2>/dev/null) || RESULT=""
-            if echo "$RESULT" | grep -q "^https://"; then VIDEO_URL="$RESULT"; fi
-          fi
-          
-          if [ -n "$VIDEO_URL" ]; then echo "video_url=$VIDEO_URL" >> $GITHUB_OUTPUT; else echo "video_url=ARTIFACT" >> $GITHUB_OUTPUT; fi
-          echo "upload_failed=$([ -n "$VIDEO_URL" ] && echo 'false' || echo 'true')" >> $GITHUB_OUTPUT
+          [ -n "$VIDEO_URL" ] && echo "video_url=$VIDEO_URL" >> $GITHUB_OUTPUT || echo "video_url=ARTIFACT" >> $GITHUB_OUTPUT
 
-      - name: Upload artifact fallback
-        if: steps.upload.outputs.upload_failed == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: rendered-video-${{ github.run_id }}
-          path: output.mp4
-          retention-days: 3
-
-      - name: Notify Activepieces
+      - name: Webhook
         if: always()
         run: |
           WEBHOOK_URL="${{ secrets.WEBHOOK_URL }}"
-          if [ -z "$WEBHOOK_URL" ]; then exit 0; fi
-          VIDEO_URL="${{ steps.upload.outputs.video_url }}"
-          PAYLOAD="{\"status\":\"$([ "$VIDEO_URL" != "ARTIFACT" ] && echo 'completed' || echo 'failed')\",\"video_url\":\"$VIDEO_URL\"}"
-          curl -sf -X POST "$WEBHOOK_URL" -H "Content-Type: application/json" -d "$PAYLOAD" || true
+          [ -z "$WEBHOOK_URL" ] && exit 0
+          URL="${{ steps.upload.outputs.video_url }}"
+          curl -sf -X POST "$WEBHOOK_URL" -H "Content-Type: application/json" -d "{\"status\":\"$([ "$URL" != "ARTIFACT" ] && echo 'completed' || echo 'failed')\",\"video_url\":\"$URL\"}" || true
