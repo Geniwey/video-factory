@@ -35,23 +35,31 @@ jobs:
           download_asset() {
             local raw_url="$1"
             local output="$2"
-            
-            # Limpiar URL
             local url=$(echo "$raw_url" | tr -d '\r\n" ' | sed 's/^undefined$//i' | sed 's/^null$//i')
             
-            if [ -n "$url" ]; then
-              echo "📥 Descargando $output..."
-              curl -L -f -A "Mozilla/5.0" --connect-timeout 20 --max-time 120 -o "$output" "$url" 2>/dev/null || true
+            if [ -z "$url" ]; then return 1; fi
+
+            # 🔐 EL TRUCO: Si es nuestro Gist secreto, lo convertimos a audio
+            if [[ "$url" == *"gist.githubusercontent.com"* ]]; then
+              echo "🔐 Detectado archivo de audio seguro. Descodificando..."
+              curl -L -s "$url" > temp.b64
+              base64 -d temp.b64 > "$output"
+              rm -f temp.b64
+              echo "✅ $output extraído con éxito."
+              return 0
             fi
+
+            # Descarga normal para vídeos de Pexels
+            echo "📥 Descargando $output..."
+            curl -L -f -A "Mozilla/5.0" --connect-timeout 20 --max-time 120 -o "$output" "$url" 2>/dev/null || true
             
-            # BLINDAJE ANTI-ERROR 183: Si el archivo es un HTML (link caído), borrarlo
             if [ -s "$output" ]; then
               local mime=$(file -b --mime-type "$output")
               if [[ "$mime" == text/html* ]] || [[ "$mime" == text/plain* ]]; then
-                echo "⚠️ El enlace devolvió texto/HTML en lugar del archivo. Descartando..."
+                echo "⚠️ Enlace bloqueado (devolvió HTML). Descartando..."
                 rm -f "$output"
               else
-                echo "✅ $output descargado correctamente (MIME: $mime)"
+                echo "✅ $output descargado correctamente."
               fi
             fi
           }
@@ -60,20 +68,15 @@ jobs:
           download_asset "${{ github.event.client_payload.video_url }}" "background_original.mp4"
           download_asset "${{ github.event.client_payload.image_url }}" "overlay_original"
 
-      - name: Audio Processing (Convert or TTS)
+      - name: Audio Processing
         run: |
           AUDIO_OK=false
-          
-          # 1. Intentar convertir el audio descargado
           if [ -f "audio_original" ]; then
-            echo "🔄 Convirtiendo audio..."
             if ffmpeg -y -i audio_original -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null; then
               AUDIO_OK=true
-              echo "✅ Audio convertido a WAV."
             fi
           fi
           
-          # 2. Si falló o no existe, generar con IA localmente
           if [ "$AUDIO_OK" = false ]; then
             echo "🎙️ Generando audio local con Edge-TTS..."
             TEXTO="${SCRIPT_TEXT:-Generando audio de emergencia.}"
@@ -83,23 +86,19 @@ jobs:
             fi
           fi
           
-          # 3. Fallback absoluto
           if [ ! -s "audio.wav" ]; then
-            echo "❌ Fallo grave. Creando 5s de silencio para no detener el render."
+            echo "❌ Fallo grave. Creando 5s de silencio."
             ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=mono -t 5 -c:a pcm_s16le audio.wav || true
           fi
           
-          # 4. Calcular duración final
           DURATION=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 audio.wav || echo "5")
           if ! awk "BEGIN {exit !($DURATION > 0)}"; then DURATION=5; fi
           echo "$DURATION" > /tmp/audio_duration.txt
-          echo "⏱️ Duración total: $DURATION segundos"
 
       - name: Visuals Processing
         run: |
           DURATION=$(cat /tmp/audio_duration.txt)
           
-          # Procesar imagen (Overlay)
           if [ -f "overlay_original" ]; then
             ffmpeg -y -i overlay_original -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" -pix_fmt rgba overlay.png 2>/dev/null || rm -f overlay.png
           fi
@@ -107,11 +106,10 @@ jobs:
             ffmpeg -y -f lavfi -i "color=c=black:s=1080x1920:d=1" -frames:v 1 overlay.png || true
           fi
           
-          # Procesar fondo
           if [ -f "background_original.mp4" ] && ffprobe -v quiet background_original.mp4; then
             cp background_original.mp4 background.mp4
           else
-            echo "⚠️ Generando fondo animado espacial..."
+            echo "⚠️ Generando fondo animado..."
             ffmpeg -y -f lavfi -i "color=c=0x0a0a1a:s=1080x1920:d=$DURATION,format=yuv420p,noise=alls=8:allf=t,vignette=PI/4" -c:v libx264 -preset ultrafast -t "$DURATION" background.mp4 || true
           fi
 
@@ -120,7 +118,7 @@ jobs:
           echo "🎙️ Usando Whisper..."
           whisper audio.wav --model small --language "${LANG_CODE}" --output_format json --word_timestamps True --output_dir . 2>/dev/null || true
           
-          echo "📝 Generando Subtítulos (Script Python Integrado)..."
+          echo "📝 Generando Subtítulos..."
           cat << 'EOF' > gen_subs.py
           import json, os
           try:
@@ -139,7 +137,6 @@ jobs:
                   chunk = words[i:i+3]
                   if not chunk: continue
                   st, en = fmt(chunk[0]["start"]), fmt(chunk[-1]["end"])
-                  
                   for j, cw in enumerate(chunk):
                       w_st, w_en = fmt(cw["start"]), fmt(cw["end"])
                       parts = []
@@ -151,12 +148,11 @@ jobs:
                       
               with open("subtitles.ass", "w") as f: f.write(ass)
           except Exception as e:
-              print("Python Error:", e)
+              pass
           EOF
           
           python3 gen_subs.py || true
           
-          # Validacion final de subtítulos
           if [ ! -s "subtitles.ass" ] || [ $(grep -c "^Dialogue:" subtitles.ass || echo 0) -lt 1 ]; then
             cat << 'EOF' > subtitles.ass
           [Script Info]
@@ -181,7 +177,6 @@ jobs:
           ffmpeg -y -stream_loop -1 -i background.mp4 -i overlay.png -i audio.wav -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,eq=brightness=-0.15:saturation=0.8[bg];[1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,format=rgba,colorchannelmixer=aa=0.2[ov];[bg][ov]overlay=0:0[merged];[merged]ass=subtitles.ass[withsubs];[withsubs]drawbox=x=0:y=0:w='min(iw,iw*t/${SAFE_DUR})':h=8:color=0xFFD700@0.9:t=fill[final]" -map "[final]" -map 2:a -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -c:a aac -b:a 192k -ar 44100 -movflags +faststart -t "$DURATION" output.mp4 || true
           
           if [ ! -s "output.mp4" ]; then
-            echo "❌ Render complejo falló. Intentando render básico..."
             ffmpeg -y -stream_loop -1 -i background.mp4 -i audio.wav -c:v libx264 -preset ultrafast -crf 25 -pix_fmt yuv420p -c:a aac -b:a 192k -t "$DURATION" output.mp4 || true
           fi
 
@@ -191,25 +186,12 @@ jobs:
           VIDEO_URL=""
           for i in 1 2 3; do
             RESULT=$(curl -f -A "Mozilla/5.0" --connect-timeout 30 --max-time 300 -F "reqtype=fileupload" -F "time=24h" -F "fileToUpload=@output.mp4" "https://litterbox.catbox.moe/resources/internals/api.php" 2>/dev/null) || RESULT=""
-            if echo "$RESULT" | grep -q "^https://"; then
-              VIDEO_URL="$RESULT"
-              break
-            fi
+            if echo "$RESULT" | grep -q "^https://"; then VIDEO_URL="$RESULT"; break; fi
             sleep 10
           done
           
-          if [ -z "$VIDEO_URL" ]; then
-            RESULT=$(curl -f -A "Mozilla/5.0" --connect-timeout 30 --max-time 300 -F "reqtype=fileupload" -F "fileToUpload=@output.mp4" "https://catbox.moe/user/api.php" 2>/dev/null) || RESULT=""
-            if echo "$RESULT" | grep -q "^https://"; then VIDEO_URL="$RESULT"; fi
-          fi
-          
-          if [ -z "$VIDEO_URL" ]; then
-            echo "video_url=ARTIFACT" >> $GITHUB_OUTPUT
-            echo "upload_failed=true" >> $GITHUB_OUTPUT
-          else
-            echo "video_url=$VIDEO_URL" >> $GITHUB_OUTPUT
-            echo "upload_failed=false" >> $GITHUB_OUTPUT
-          fi
+          if [ -n "$VIDEO_URL" ]; then echo "video_url=$VIDEO_URL" >> $GITHUB_OUTPUT; else echo "video_url=ARTIFACT" >> $GITHUB_OUTPUT; fi
+          echo "upload_failed=$([ -n "$VIDEO_URL" ] && echo 'false' || echo 'true')" >> $GITHUB_OUTPUT
 
       - name: Upload artifact fallback
         if: steps.upload.outputs.upload_failed == 'true'
@@ -225,9 +207,5 @@ jobs:
           WEBHOOK_URL="${{ secrets.WEBHOOK_URL }}"
           if [ -z "$WEBHOOK_URL" ]; then exit 0; fi
           VIDEO_URL="${{ steps.upload.outputs.video_url }}"
-          if [ -n "$VIDEO_URL" ] && [ "$VIDEO_URL" != "ARTIFACT" ]; then
-            PAYLOAD="{\"status\":\"completed\",\"video_url\":\"$VIDEO_URL\"}"
-          else
-            PAYLOAD="{\"status\":\"failed\"}"
-          fi
+          PAYLOAD="{\"status\":\"$([ "$VIDEO_URL" != "ARTIFACT" ] && echo 'completed' || echo 'failed')\",\"video_url\":\"$VIDEO_URL\"}"
           curl -sf -X POST "$WEBHOOK_URL" -H "Content-Type: application/json" -d "$PAYLOAD" || true
