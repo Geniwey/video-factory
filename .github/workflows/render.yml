@@ -1,4 +1,4 @@
-name: Render Short Video Ultra
+name: Render Short Diagnostic
 
 on:
   repository_dispatch:
@@ -7,295 +7,138 @@ on:
 jobs:
   render:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    env:
-      LANG_CODE: 'es'
-      SCRIPT_TEXT: ${{ github.event.client_payload.script_text || 'Contenido de tecnología importante' }}
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup environment
+      - name: Setup minimal
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg bc file
-          pip install --quiet openai-whisper edge-tts
-          mkdir -p ~/.fonts
-          wget -q -O ~/.fonts/Montserrat-Black.ttf "https://github.com/google/fonts/raw/main/ofl/montserrat/static/Montserrat-Black.ttf" || true
-          fc-cache -f
-          echo "🔧 Entorno listo"
+          sudo apt-get install -y -qq ffmpeg bc
+          pip install --quiet edge-tts
+          echo "🔧 Entorno mínimo listo"
 
-      - name: Download assets (BLINDADO)
+      - name: Download ONLY the image
         run: |
-          set +e
-          echo "📥 Descargando assets..."
+          echo "📥 Descargando SOLO la imagen..."
+          echo "URL recibida: ${{ github.event.client_payload.image_url }}"
 
-          download() {
-            local url="$1"
-            local out="$2"
-            url=$(echo "$url" | tr -d '\r\n" ' | sed 's/^null$//i' | sed 's/^undefined$//i')
-            [ -z "$url" ] && echo "⚠️ URL vacía para $out" && return 1
-            echo "   Descargando $out..."
-            curl -L -f -A "Mozilla/5.0" --connect-timeout 20 --max-time 120 -o "$out" "$url" 2>/dev/null || return 1
-            [ -s "$out" ] || return 1
-            mime=$(file -b --mime-type "$out" 2>/dev/null)
-            echo "   ✅ $mime $(wc -c < "$out") bytes"
-            echo "$mime" | grep -q "text/html" && rm -f "$out" && return 1
-            return 0
-          }
+          # Limpieza EXTREMA de la URL
+          CLEAN_URL=$(echo "${{ github.event.client_payload.image_url }}" | tr -d '\r\n" ' | sed 's/^undefined$//i' | sed 's/^null$//i')
 
-          download "${{ github.event.client_payload.image_url }}" "overlay.jpg" && echo "HAS_IMAGE=true" >> $GITHUB_ENV || echo "HAS_IMAGE=false" >> $GITHUB_ENV
-          download "${{ github.event.client_payload.video_url }}" "background.mp4" && echo "HAS_BG=true" >> $GITHUB_ENV || echo "HAS_BG=false" >> $GITHUB_ENV
-          download "${{ github.event.client_payload.audio_url }}" "audio_original" && echo "HAS_AUDIO=true" >> $GITHUB_ENV || echo "HAS_AUDIO=false" >> $GITHUB_ENV
-
-      - name: Audio processing (FALLBACK INCLUIDO)
-        run: |
-          set +e
-          echo "🎙️ Procesando audio..."
-
-          if [ "${{ env.HAS_AUDIO }}" = "true" ] && [ -s "audio_original" ]; then
-            ffmpeg -y -i audio_original -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null && echo "✅ Audio convertido" || rm -f audio.wav
+          if [ -z "$CLEAN_URL" ]; then
+            echo "❌ ERROR: URL de imagen VACÍA"
+            echo "HAS_IMAGE=false" >> $GITHUB_ENV
+            exit 0
           fi
 
-          if [ ! -s "audio.wav" ]; then
-            echo "🎤 Generando con Edge-TTS..."
-            echo "${SCRIPT_TEXT}" | head -c 5000 > /tmp/script.txt
-            edge-tts --voice "es-ES-AlvaroNeural" --rate="+5%" --pitch="-3Hz" --file /tmp/script.txt --write-media temp.mp3 2>/dev/null || true
-            [ -s "temp.mp3" ] && ffmpeg -y -i temp.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null || true
+          echo "URL limpia: $CLEAN_URL"
+
+          curl -L -f -A "Mozilla/5.0" --connect-timeout 20 --max-time 60 -o overlay.jpg "$CLEAN_URL" 2>/dev/null
+
+          if [ -s "overlay.jpg" ]; then
+            echo "✅ Imagen descargada: $(wc -c < overlay.jpg) bytes"
+            echo "HAS_IMAGE=true" >> $GITHUB_ENV
+            file overlay.jpg
+          else
+            echo "❌ ERROR: No se pudo descargar la imagen"
+            echo "HAS_IMAGE=false" >> $GITHUB_ENV
           fi
 
-          if [ ! -s "audio.wav" ]; then
+      - name: Generate audio from text
+        run: |
+          echo "🎙️ Generando audio con Edge-TTS..."
+          echo "${{ github.event.client_payload.script_text || 'Contenido de tecnología importante' }}" > /tmp/script.txt
+
+          edge-tts \
+            --voice "es-ES-AlvaroNeural" \
+            --rate="+5%" \
+            --pitch="-3Hz" \
+            --file /tmp/script.txt \
+            --write-media audio.mp3 2>/dev/null || true
+
+          if [ -s "audio.mp3" ]; then
+            ffmpeg -y -i audio.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null
+            echo "✅ Audio generado"
+          else
             echo "⚠️ Generando silencio de emergencia"
-            ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=mono -t 5 -c:a pcm_s16le audio.wav 2>/dev/null || true
+            ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=mono -t 5 -c:a pcm_s16le audio.wav 2>/dev/null
           fi
 
           DURATION=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 audio.wav 2>/dev/null || echo "5")
-          [ -z "$DURATION" ] || [ "$DURATION" = "N/A" ] && DURATION="5"
           echo "$DURATION" > /tmp/duration.txt
           echo "⏱️ Duración: ${DURATION}s"
 
-      - name: Prepare image (KEN BURNS READY)
+      - name: Render MINIMAL video (SOLO IMAGEN + AUDIO)
         run: |
-          set +e
-          echo "🖼️ Preparando imagen para Ken Burns..."
-
-          if [ "${{ env.HAS_IMAGE }}" = "true" ] && [ -s "overlay.jpg" ]; then
-            ffmpeg -y -i overlay.jpg \
-              -vf "scale=4320:7680:force_original_aspect_ratio=decrease,pad=4320:7680:(ow-iw)/2:(oh-ih)/2:black" \
-              -pix_fmt yuvj420p overlay_large.jpg 2>/dev/null && echo "✅ Imagen lista" || rm -f overlay_large.jpg
-          fi
-
-          [ -s "overlay_large.jpg" ] && echo "HAS_IMAGE_LARGE=true" >> $GITHUB_ENV || echo "HAS_IMAGE_LARGE=false" >> $GITHUB_ENV
-
-      - name: Create Ken Burns effect (AGRESIVO)
-        run: |
-          set +e
-          echo "🎥 Creando efecto Ken Burns..."
+          echo "🎬 Renderizando vídeo MÍNIMO..."
 
           DURATION=$(cat /tmp/duration.txt)
           FRAMES=$(echo "$DURATION * 30" | bc 2>/dev/null | awk '{print int($1+0.5)}' || echo "150")
           [ "$FRAMES" -lt 30 ] && FRAMES=150
 
-          if [ "${{ env.HAS_IMAGE_LARGE }}" = "true" ]; then
-            ffmpeg -y -i overlay_large.jpg \
-              -filter_complex "[0:v]zoompan=z='min(1.0+0.22*on/${FRAMES},1.22)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${FRAMES}:s=1080x1920:fps=30,format=yuv420p[v]" \
-              -map "[v]" -c:v libx264 -preset fast -crf 18 -pix_fmt yuv420p -t "$DURATION" ken_burns.mp4 2>/dev/null && \
-              echo "✅ Ken Burns creado" && echo "HAS_KB=true" >> $GITHUB_ENV || echo "HAS_KB=false" >> $GITHUB_ENV
-          else
-            echo "HAS_KB=false" >> $GITHUB_ENV
-          fi
+          if [ "${{ env.HAS_IMAGE }}" = "true" ]; then
+            echo "🖼️ Usando imagen descargada"
 
-      - name: Prepare background (OSCURECIDO)
-        run: |
-          set +e
-          echo "🌑 Preparando fondo..."
-
-          DURATION=$(cat /tmp/duration.txt)
-
-          if [ "${{ env.HAS_BG }}" = "true" ] && [ -s "background.mp4" ]; then
-            ffmpeg -y -stream_loop -1 -i background.mp4 \
-              -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,eq=brightness=-0.55:saturation=0.3,format=yuv420p[v]" \
-              -map "[v]" -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -t "$DURATION" bg_dark.mp4 2>/dev/null && \
-              echo "✅ Fondo oscurecido" && echo "HAS_DARKBG=true" >> $GITHUB_ENV || echo "HAS_DARKBG=false" >> $GITHUB_ENV
-          else
-            ffmpeg -y -f lavfi -i "color=c=0x0a0e27:s=1080x1920:d=${DURATION}:r=30" \
-              -vf "vignette=PI/2.5,noise=alls=3:allf=t,eq=brightness=-0.05:contrast=1.15" \
-              -c:v libx264 -preset ultrafast -crf 28 -pix_fmt yuv420p -t "$DURATION" bg_dark.mp4 2>/dev/null && \
-              echo "✅ Fondo generado" && echo "HAS_DARKBG=true" >> $GITHUB_ENV || echo "HAS_DARKBG=false" >> $GITHUB_ENV
-          fi
-
-      - name: Generate subtitles (KARAOKE)
-        run: |
-          set +e
-          echo "📝 Generando subtítulos..."
-
-          whisper audio.wav --model small --language es --output_format json --word_timestamps True --output_dir . 2>/dev/null || true
-
-          cat << 'EOF' > gen_subs.py
-          import json, os
-          try:
-              with open("audio.json") as f:
-                  data = json.load(f)
-              words = [w for s in data.get("segments",[]) for w in s.get("words",[]) if w.get("word","").strip()]
-              if len(words) < 2: raise Exception("Pocas palabras")
-
-              header = """[Script Info]
-          ScriptType: v4.00+
-          PlayResX: 1080
-          PlayResY: 1920
-
-          [V4+ Styles]
-          Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-          Style: Default,Montserrat Black,85,&H00FFFFFF,&H0000D7FF,&H00000000,&HBB000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,500,1
-
-          [Events]
-          Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-          """
-
-              def fmt(s):
-                  h = int(s//3600)
-                  m = int((s%3600)//60)
-                  sec = int(s%60)
-                  cs = min(int(round((s%1)*100)),99)
-                  return f"{h}:{m:02d}:{sec:02d}.{cs:02d}"
-
-              lines = []
-              for i in range(0, len(words), 3):
-                  chunk = words[i:i+3]
-                  if not chunk: continue
-                  for j, cw in enumerate(chunk):
-                      parts = []
-                      for k, w in enumerate(chunk):
-                          c = w["word"].strip().upper().replace("{","").replace("}","")
-                          parts.append(f"{{\\c&H0000D7FF\\fscx115\\fscy115}}{c}{{\\c&H00FFFFFF\\fscx100\\fscy100}}" if k==j else c)
-                      lines.append(f"Dialogue: 0,{fmt(cw['start'])},{fmt(cw['end'])},Default,,0,0,0,,{' '.join(parts)}")
-
-              with open("subtitles.ass","w") as f:
-                  f.write(header)
-                  for l in lines: f.write(l+"\n")
-              print(f"✅ {len(lines)} líneas")
-          except Exception as e:
-              print(f"⚠️ Fallback: {e}")
-              with open("subtitles.ass","w") as f:
-                  f.write("""[Script Info]
-          ScriptType: v4.00+
-          PlayResX: 1080
-          PlayResY: 1920
-
-          [V4+ Styles]
-          Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-          Style: Default,Montserrat,80,&H00FFFFFF,&H0000D7FF,&H00000000,&HBB000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,500,1
-
-          [Events]
-          Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-          Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,
-          """)
-          EOF
-
-          python3 gen_subs.py || true
-
-      - name: Render final video (ELITE)
-        run: |
-          set +e
-          echo "🎬 Renderizando vídeo final..."
-
-          DURATION=$(cat /tmp/duration.txt)
-          SAFE_DUR=$(printf '%.2f' "$DURATION")
-
-          # INTENTO 1: FUERZA BRUTA MATEMÁTICA (85% IA + 15% Pexels)
-          if [ "${{ env.HAS_KB }}" = "true" ] && [ "${{ env.HAS_DARKBG }}" = "true" ]; then
-            echo "🎥 INTENTO 1: Mezcla Matemática"
+            # Versión ULTRA-SIMPLE sin escalado 8K
             ffmpeg -y \
-              -i ken_burns.mp4 \
-              -i bg_dark.mp4 \
-              -i audio.wav \
+              -i overlay.jpg \
               -filter_complex "\
-                [0:v]format=yuv420p,setsar=1[main]; \
-                [1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,format=yuv420p,setsar=1[texture]; \
-                [main][texture]blend=all_expr='A*0.85+B*0.15'[mixed]; \
-                [mixed]ass=subtitles.ass[withsubs]; \
-                [withsubs]drawbox=x=0:y=0:w='min(iw\,iw*t/${SAFE_DUR})':h=10:color=0xFFD700@0.9:t=fill[final]" \
-              -map "[final]" -map 2:a \
-              -c:v libx264 -preset medium -crf 20 -pix_fmt yuv420p \
-              -c:a aac -b:a 192k -ar 44100 \
-              -movflags +faststart -t "$DURATION" \
-              output.mp4 2>/dev/null && echo "✅ RENDER COMPLETADO" && exit 0
+                [0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,\
+                zoompan=z='min(1.0+0.15*on/${FRAMES},1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${FRAMES}:s=1080x1920:fps=30[v]" \
+              -map "[v]" \
+              -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p \
+              -t "$DURATION" \
+              ken_burns.mp4 2>/dev/null
+
+            if [ -s "ken_burns.mp4" ]; then
+              echo "✅ Ken Burns generado correctamente"
+              ffmpeg -y -i ken_burns.mp4 -i audio.wav -c:v copy -c:a aac -b:a 192k output.mp4 2>/dev/null
+            else
+              echo "❌ ERROR: ken_burns.mp4 está vacío o corrupto"
+              ffmpeg -y -f lavfi -i "color=c=red:s=1080x1920:d=${DURATION}:r=30" -i audio.wav -c:v libx264 -c:a aac output.mp4 2>/dev/null
+            fi
+          else
+            echo "⚠️ Usando fondo rojo de emergencia (no había imagen)"
+            ffmpeg -y -f lavfi -i "color=c=red:s=1080x1920:d=${DURATION}:r=30" -i audio.wav -c:v libx264 -c:a aac output.mp4 2>/dev/null
           fi
 
-          # INTENTO 2: FUERZA BRUTA MATEMÁTICA (sin subs)
-          if [ "${{ env.HAS_KB }}" = "true" ] && [ "${{ env.HAS_DARKBG }}" = "true" ]; then
-            echo "🎥 INTENTO 2: Mezcla Matemática (sin subs)"
-            ffmpeg -y \
-              -i ken_burns.mp4 -i bg_dark.mp4 -i audio.wav \
-              -filter_complex "\
-                [0:v]format=yuv420p,setsar=1[main]; \
-                [1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,format=yuv420p,setsar=1[texture]; \
-                [main][texture]blend=all_expr='A*0.85+B*0.15'[final]" \
-              -map "[final]" -map 2:a \
-              -c:v libx264 -preset medium -crf 20 -pix_fmt yuv420p \
-              -c:a aac -b:a 192k -movflags +faststart -t "$DURATION" \
-              output.mp4 2>/dev/null && echo "✅ IA + Pexels OK" && exit 0
-          fi
-
-          # INTENTO 3: Solo IA + Subs
-          if [ "${{ env.HAS_KB }}" = "true" ]; then
-            echo "🎥 INTENTO 3: Solo IA + Subs"
-            ffmpeg -y -i ken_burns.mp4 -i audio.wav \
-              -filter_complex "[0:v]ass=subtitles.ass[withsubs];[withsubs]drawbox=x=0:y=0:w='min(iw\,iw*t/${SAFE_DUR})':h=10:color=0xFFD700@0.9:t=fill[final]" \
-              -map "[final]" -map 1:a \
-              -c:v libx264 -preset medium -crf 20 -pix_fmt yuv420p \
-              -c:a aac -b:a 192k -movflags +faststart -t "$DURATION" \
-              output.mp4 2>/dev/null && echo "✅ Solo IA OK" && exit 0
-          fi
-
-          # INTENTO 4: Solo IA
-          if [ "${{ env.HAS_KB }}" = "true" ]; then
-            echo "🎥 INTENTO 4: Solo IA"
-            ffmpeg -y -i ken_burns.mp4 -i audio.wav \
-              -c:v copy -c:a aac -b:a 192k -movflags +faststart -t "$DURATION" \
-              output.mp4 2>/dev/null && echo "✅ Solo IA básico" && exit 0
-          fi
-
-          # INTENTO 5: Solo Fondo
-          echo "🎥 INTENTO 5: Solo Fondo"
-          ffmpeg -y -stream_loop -1 -i bg_dark.mp4 -i audio.wav \
-            -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[final]" \
-            -map "[final]" -map 1:a \
-            -c:v libx264 -preset ultrafast -crf 25 -pix_fmt yuv420p \
-            -c:a aac -b:a 192k -t "$DURATION" \
-            output.mp4 2>/dev/null && echo "✅ Solo Fondo" && exit 0
-
-          # INTENTO 6: Emergencia
-          echo "🎥 INTENTO 6: Emergencia"
-          ffmpeg -y -f lavfi -i "color=c=black:s=1080x1920:d=${DURATION}:r=30" \
-            -i audio.wav \
-            -c:v libx264 -preset ultrafast -crf 28 -pix_fmt yuv420p \
-            -c:a aac -b:a 128k -t "$DURATION" -shortest \
-            output.mp4 2>/dev/null || echo "❌ Fallo total"
-
-      - name: Upload video
+      - name: Upload diagnostic video
+        id: upload
         run: |
-          echo "📤 Subiendo vídeo..."
+          echo "📤 Subiendo vídeo de diagnóstico..."
+
           for i in 1 2 3; do
-            URL=$(curl -f -A "Mozilla/5.0" --connect-timeout 30 --max-time 300 \
+            URL=$(curl -f -A "Mozilla/5.0" --connect-timeout 30 --max-time 60 \
               -F "reqtype=fileupload" -F "time=24h" -F "fileToUpload=@output.mp4" \
               "https://litterbox.catbox.moe/resources/internals/api.php" 2>/dev/null || echo "")
-            if echo "$URL" | grep -q "^https://"; then
-              echo "✅ $URL"
-              echo "video_url=$URL" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-            sleep 10
-          done
-          echo "video_url=UPLOAD_FAILED" >> $GITHUB_OUTPUT
 
-      - name: Webhook
-        if: always()
+            if echo "$URL" | grep -q "^https://"; then
+              echo "✅ Vídeo subido: $URL"
+              echo "video_url=$URL" >> $GITHUB_OUTPUT
+              break
+            fi
+            sleep 5
+          done
+
+          if [ -z "$URL" ]; then
+            echo "video_url=UPLOAD_FAILED" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Diagnostic report
         run: |
-          WEBHOOK_URL="${{ secrets.WEBHOOK_URL }}"
-          [ -z "$WEBHOOK_URL" ] && exit 0
-          VIDEO_URL="${{ steps.upload.outputs.video_url }}"
-          STATUS=$([ "$VIDEO_URL" != "UPLOAD_FAILED" ] && echo "completed" || echo "failed")
-          curl -sf -X POST "$WEBHOOK_URL" -H "Content-Type: application/json" \
-            -d "{\"status\":\"$STATUS\",\"video_url\":\"$VIDEO_URL\"}" 2>/dev/null || true
+          echo "📋 === INFORME DE DIAGNÓSTICO ==="
+          echo ""
+          echo "🔍 URL de imagen recibida: ${{ github.event.client_payload.image_url }}"
+          echo "📥 Imagen descargada: ${{ env.HAS_IMAGE }}"
+          echo "🎬 Duración del audio: $(cat /tmp/duration.txt)s"
+          echo "📁 Tamaño del vídeo final: $(du -h output.mp4 | cut -f1)"
+          echo ""
+          echo "🔗 Vídeo final: ${{ steps.upload.outputs.video_url }}"
+          echo ""
+          echo "💡 POSIBLES RESULTADOS:"
+          echo "   ✅ Si ves la imagen IA con zoom → El problema era el escalado 8K"
+          echo "   ❌ Si ves fondo rojo → La URL de la imagen no llega bien a GitHub"
+          echo "   ❌ Si el vídeo está corrupto → Problema con la descarga de la imagen"
+          echo "════════════════════════════════════════════════════════════════"
