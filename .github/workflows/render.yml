@@ -38,9 +38,9 @@ jobs:
         run: |
           pip install openai-whisper edge-tts
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg bc
+          sudo apt-get install -y -qq ffmpeg bc fonts-montserrat
           mkdir -p ~/.fonts
-          wget -q -O ~/.fonts/Montserrat-Black.ttf "https://github.com/JulietaUla/Montserrat/raw/master/fonts/ttf/Montserrat-Black.ttf"
+          wget -q -O ~/.fonts/Montserrat-Black.ttf "https://github.com/google/fonts/raw/main/ofl/montserrat/static/Montserrat-Black.ttf" || true
           fc-cache -f
           echo "✅ Dependencias instaladas"
 
