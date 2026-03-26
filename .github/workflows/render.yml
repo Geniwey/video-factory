@@ -11,6 +11,7 @@ jobs:
 
     env:
       LANG_CODE: ${{ github.event.client_payload.language || 'es' }}
+      SCRIPT_TEXT: ${{ github.event.client_payload.script_text }}
 
     steps:
       - uses: actions/checkout@v4
@@ -19,129 +20,146 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Cache Whisper model
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/whisper
-          key: whisper-small-v3
-
       - name: Install dependencies
         run: |
           pip install --quiet openai-whisper edge-tts
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg bc
+          sudo apt-get install -y -qq ffmpeg bc file
           
           mkdir -p ~/.fonts
           wget -q -O ~/.fonts/Montserrat-Black.ttf "https://github.com/google/fonts/raw/main/ofl/montserrat/static/Montserrat-Black.ttf" || true
           fc-cache -f
 
-      - name: Download assets (Extreme Shield)
+      - name: Download & Verify Assets
         run: |
           download_asset() {
             local raw_url="$1"
             local output="$2"
-            local fallback_url="$3"
-            local attempt=1
             
-            # Sanitización EXTREMA en Bash: fuera comillas, espacios y saltos de línea
+            # Limpiar URL
             local url=$(echo "$raw_url" | tr -d '\r\n" ' | sed 's/^undefined$//i' | sed 's/^null$//i')
             
-            if [ -z "$url" ]; then
-              echo "⚠️ URL recibida vacía para $output. Usando fallback..."
-              url="$fallback_url"
-            fi
-
-            while [ $attempt -le 3 ]; do
-              echo "📥 Descargando $output (intento $attempt/3)..."
-              
-              # El disfraz: User-Agent de Chrome en Windows
-              HTTP_CODE=$(curl -L -f \
-                -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-                --connect-timeout 20 \
-                --max-time 120 \
-                -w "%{http_code}" \
-                -o "$output" \
-                "$url" 2>/dev/null) || HTTP_CODE="000"
-
-              if [ -f "$output" ]; then
-                local size=$(stat --printf="%s" "$output" 2>/dev/null || echo "0")
-                if [ "$size" -gt 5000 ]; then
-                  echo "✅ $output descargado con éxito [HTTP $HTTP_CODE]"
-                  return 0
-                fi
-                rm -f "$output" # Borrar si es un archivo corrupto de 1 byte
-              fi
-              
-              echo "⚠️ Intento $attempt falló [HTTP $HTTP_CODE]"
-              sleep 5
-              attempt=$((attempt + 1))
-            done
-
-            # Fallback final si la URL original falló 3 veces
-            if [ "$url" != "$fallback_url" ] && [ -n "$fallback_url" ]; then
-              echo "🔄 Intentando URL de emergencia..."
-              curl -L -f -A "Mozilla/5.0" -o "$output" "$fallback_url" 2>/dev/null
-              if [ -f "$output" ] && [ "$(stat --printf='%s' "$output")" -gt 5000 ]; then
-                return 0
-              fi
+            if [ -n "$url" ]; then
+              echo "📥 Descargando $output..."
+              curl -L -f -A "Mozilla/5.0" --connect-timeout 20 --max-time 120 -o "$output" "$url" 2>/dev/null || true
             fi
             
-            echo "❌ No se pudo descargar $output"
-            # Creamos un archivo vacío para que no estalle el siguiente paso, se manejará en Normalize
-            touch "$output"
+            # BLINDAJE ANTI-ERROR 183: Si el archivo es un HTML (link caído), borrarlo
+            if [ -s "$output" ]; then
+              local mime=$(file -b --mime-type "$output")
+              if [[ "$mime" == text/html* ]] || [[ "$mime" == text/plain* ]]; then
+                echo "⚠️ El enlace devolvió texto/HTML en lugar del archivo. Descartando..."
+                rm -f "$output"
+              else
+                echo "✅ $output descargado correctamente (MIME: $mime)"
+              fi
+            fi
           }
 
-          download_asset "${{ github.event.client_payload.audio_url }}" "audio_original" ""
-          download_asset "${{ github.event.client_payload.video_url }}" "background_original.mp4" "https://videos.pexels.com/video-files/3129671/3129671-hd_1080_1920_30fps.mp4"
-          download_asset "${{ github.event.client_payload.image_url }}" "overlay_original" "https://images.pexels.com/photos/7130560/pexels-photo-7130560.jpeg?w=1080"
+          download_asset "${{ github.event.client_payload.audio_url }}" "audio_original"
+          download_asset "${{ github.event.client_payload.video_url }}" "background_original.mp4"
+          download_asset "${{ github.event.client_payload.image_url }}" "overlay_original"
 
-      - name: TTS fallback if needed
+      - name: Audio Processing (Convert or TTS)
         run: |
-          if [ -s "audio_original" ]; then
-            echo "✅ Audio existe."
-          else
-            echo "⚠️ Audio vacío. Generando con Edge-TTS..."
-            SCRIPT_TEXT="${{ github.event.client_payload.script_text }}"
-            [ -z "$SCRIPT_TEXT" ] && SCRIPT_TEXT="Error en el guion, audio de emergencia."
-            echo "$SCRIPT_TEXT" > /tmp/script.txt
-            edge-tts --voice "es-ES-AlvaroNeural" --rate "+5%" --pitch "-3Hz" --file /tmp/script.txt --write-media audio_original
+          AUDIO_OK=false
+          
+          # 1. Intentar convertir el audio descargado
+          if [ -f "audio_original" ]; then
+            echo "🔄 Convirtiendo audio..."
+            if ffmpeg -y -i audio_original -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null; then
+              AUDIO_OK=true
+              echo "✅ Audio convertido a WAV."
+            fi
           fi
-
-      - name: Normalize asset formats
-        run: |
-          ffmpeg -y -i audio_original -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null
-          DURATION=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 audio.wav || echo "10")
+          
+          # 2. Si falló o no existe, generar con IA localmente
+          if [ "$AUDIO_OK" = false ]; then
+            echo "🎙️ Generando audio local con Edge-TTS..."
+            TEXTO="${SCRIPT_TEXT:-Generando audio de emergencia.}"
+            echo "$TEXTO" > /tmp/script.txt
+            if edge-tts --voice "es-ES-AlvaroNeural" --rate "+5%" --pitch "-3Hz" --file /tmp/script.txt --write-media temp_tts.mp3; then
+               ffmpeg -y -i temp_tts.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null || true
+            fi
+          fi
+          
+          # 3. Fallback absoluto
+          if [ ! -s "audio.wav" ]; then
+            echo "❌ Fallo grave. Creando 5s de silencio para no detener el render."
+            ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=mono -t 5 -c:a pcm_s16le audio.wav || true
+          fi
+          
+          # 4. Calcular duración final
+          DURATION=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 audio.wav || echo "5")
+          if ! awk "BEGIN {exit !($DURATION > 0)}"; then DURATION=5; fi
           echo "$DURATION" > /tmp/audio_duration.txt
+          echo "⏱️ Duración total: $DURATION segundos"
 
-          if [ -s overlay_original ] && ffprobe -v quiet overlay_original; then
-            ffmpeg -y -i overlay_original -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" -pix_fmt rgba overlay.png 2>/dev/null || ffmpeg -y -f lavfi -i "color=c=black:s=1080x1920:d=1" -frames:v 1 overlay.png
-          else
-            ffmpeg -y -f lavfi -i "color=c=black:s=1080x1920:d=1" -frames:v 1 overlay.png
+      - name: Visuals Processing
+        run: |
+          DURATION=$(cat /tmp/audio_duration.txt)
+          
+          # Procesar imagen (Overlay)
+          if [ -f "overlay_original" ]; then
+            ffmpeg -y -i overlay_original -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" -pix_fmt rgba overlay.png 2>/dev/null || rm -f overlay.png
           fi
-
-          if [ -s background_original.mp4 ] && ffprobe -v quiet background_original.mp4; then
+          if [ ! -f "overlay.png" ]; then
+            ffmpeg -y -f lavfi -i "color=c=black:s=1080x1920:d=1" -frames:v 1 overlay.png || true
+          fi
+          
+          # Procesar fondo
+          if [ -f "background_original.mp4" ] && ffprobe -v quiet background_original.mp4; then
             cp background_original.mp4 background.mp4
           else
-            ffmpeg -y -f lavfi -i "color=c=0x1a1a2e:s=1080x1920:d=$DURATION,format=yuv420p" -c:v libx264 -preset ultrafast -t "$DURATION" background.mp4
+            echo "⚠️ Generando fondo animado espacial..."
+            ffmpeg -y -f lavfi -i "color=c=0x0a0a1a:s=1080x1920:d=$DURATION,format=yuv420p,noise=alls=8:allf=t,vignette=PI/4" -c:v libx264 -preset ultrafast -t "$DURATION" background.mp4 || true
           fi
 
-      - name: Transcribe with Whisper
+      - name: Transcribe & Subtitles
         run: |
-          whisper audio.wav --model small --language "${{ env.LANG_CODE }}" --output_format json --word_timestamps True --output_dir . 2>&1 | tail -5 || true
-          if [ ! -f "audio.json" ]; then
-            DURATION=$(cat /tmp/audio_duration.txt)
-            echo '{"segments": [{"start": 0, "end": '$DURATION', "text": "Error transcripcion", "words": [{"word": "Error", "start": 0.0, "end": '$DURATION'}]}]}' > audio.json
-          fi
-        env:
-          SCRIPT_TEXT: ${{ github.event.client_payload.script_text }}
-
-      - name: Generate subtitles
-        run: |
-          python3 generate_subs.py || python3 generate_subs_fallback.py
-          if [ ! -f "subtitles.ass" ]; then
-            cat > subtitles.ass << 'ASSEOF'
+          echo "🎙️ Usando Whisper..."
+          whisper audio.wav --model small --language "${LANG_CODE}" --output_format json --word_timestamps True --output_dir . 2>/dev/null || true
+          
+          echo "📝 Generando Subtítulos (Script Python Integrado)..."
+          cat << 'EOF' > gen_subs.py
+          import json, os
+          try:
+              with open("audio.json", "r") as f: data = json.load(f)
+              words = []
+              for seg in data.get("segments", []):
+                  for w in seg.get("words", []): words.append(w)
+              
+              ass = "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Montserrat Black,80,&H00FFFFFF,&H0000D7FF,&H00000000,&HBB000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,538,1\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+              
+              def fmt(s):
+                  h, m, s, cs = int(s//3600), int((s%3600)//60), int(s%60), int(round((s%1)*100))
+                  return f"{h}:{m:02d}:{s:02d}.{min(cs,99):02d}"
+              
+              for i in range(0, len(words), 3):
+                  chunk = words[i:i+3]
+                  if not chunk: continue
+                  st, en = fmt(chunk[0]["start"]), fmt(chunk[-1]["end"])
+                  
+                  for j, cw in enumerate(chunk):
+                      w_st, w_en = fmt(cw["start"]), fmt(cw["end"])
+                      parts = []
+                      for k, w in enumerate(chunk):
+                          txt = w["word"].strip().upper().replace('{','').replace('}','')
+                          if k == j: parts.append(f"{{\\c&H0000D7FF\\fscx110\\fscy110}}{txt}{{\\c&H00FFFFFF\\fscx100\\fscy100}}")
+                          else: parts.append(txt)
+                      ass += f"Dialogue: 0,{w_st},{w_en},Default,,0,0,0,,{' '.join(parts)}\n"
+                      
+              with open("subtitles.ass", "w") as f: f.write(ass)
+          except Exception as e:
+              print("Python Error:", e)
+          EOF
+          
+          python3 gen_subs.py || true
+          
+          # Validacion final de subtítulos
+          if [ ! -s "subtitles.ass" ] || [ $(grep -c "^Dialogue:" subtitles.ass || echo 0) -lt 1 ]; then
+            cat << 'EOF' > subtitles.ass
           [Script Info]
-          Title: Empty
           ScriptType: v4.00+
           PlayResX: 1080
           PlayResY: 1920
@@ -150,13 +168,22 @@ jobs:
           Style: Default,Montserrat,80,&H00FFFFFF,&H0000D7FF,&H00000000,&HBB000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,538,1
           [Events]
           Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-          ASSEOF
+          Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,
+          EOF
           fi
 
-      - name: Render video
+      - name: Render Video with FFmpeg
         run: |
-          chmod +x render.sh
-          bash render.sh
+          DURATION=$(cat /tmp/audio_duration.txt)
+          SAFE_DUR=$(printf '%.2f' "$DURATION")
+          
+          echo "🎬 Montando video..."
+          ffmpeg -y -stream_loop -1 -i background.mp4 -i overlay.png -i audio.wav -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,eq=brightness=-0.15:saturation=0.8[bg];[1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,format=rgba,colorchannelmixer=aa=0.2[ov];[bg][ov]overlay=0:0[merged];[merged]ass=subtitles.ass[withsubs];[withsubs]drawbox=x=0:y=0:w='min(iw,iw*t/${SAFE_DUR})':h=8:color=0xFFD700@0.9:t=fill[final]" -map "[final]" -map 2:a -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -c:a aac -b:a 192k -ar 44100 -movflags +faststart -t "$DURATION" output.mp4 || true
+          
+          if [ ! -s "output.mp4" ]; then
+            echo "❌ Render complejo falló. Intentando render básico..."
+            ffmpeg -y -stream_loop -1 -i background.mp4 -i audio.wav -c:v libx264 -preset ultrafast -crf 25 -pix_fmt yuv420p -c:a aac -b:a 192k -t "$DURATION" output.mp4 || true
+          fi
 
       - name: Upload result
         id: upload
