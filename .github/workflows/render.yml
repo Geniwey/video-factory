@@ -37,24 +37,27 @@ jobs:
             local output="$2"
             local url=$(echo "$raw_url" | tr -d '\r\n" ' | sed 's/^undefined$//i' | sed 's/^null$//i')
             
-            if [ -z "$url" ]; then return 1; fi
+            # 🔥 EL ARREGLO: Si está vacío, simplemente salimos en paz (return 0), no destruimos la máquina.
+            if [ -z "$url" ]; then 
+              echo "⚠️ URL vacía para $output. Se generará un fondo automático."
+              return 0 
+            fi
 
             # 🔐 EL TRUCO: Si es nuestro Gist secreto, lo convertimos a audio
             if [[ "$url" == *"gist.githubusercontent.com"* ]]; then
-              echo "🔐 Detectado archivo de audio seguro. Descodificando..."
-              curl -L -s "$url" > temp.b64
-              base64 -d temp.b64 > "$output"
+              echo "🔐 Detectado archivo seguro. Descodificando..."
+              curl -L -s "$url" > temp.b64 || true
+              base64 -d temp.b64 > "$output" 2>/dev/null || true
               rm -f temp.b64
               echo "✅ $output extraído con éxito."
               return 0
             fi
 
-            # Descarga normal para vídeos de Pexels
             echo "📥 Descargando $output..."
             curl -L -f -A "Mozilla/5.0" --connect-timeout 20 --max-time 120 -o "$output" "$url" 2>/dev/null || true
             
             if [ -s "$output" ]; then
-              local mime=$(file -b --mime-type "$output")
+              local mime=$(file -b --mime-type "$output" 2>/dev/null || echo "unknown")
               if [[ "$mime" == text/html* ]] || [[ "$mime" == text/plain* ]]; then
                 echo "⚠️ Enlace bloqueado (devolvió HTML). Descartando..."
                 rm -f "$output"
@@ -62,11 +65,12 @@ jobs:
                 echo "✅ $output descargado correctamente."
               fi
             fi
+            return 0
           }
 
-          download_asset "${{ github.event.client_payload.audio_url }}" "audio_original"
-          download_asset "${{ github.event.client_payload.video_url }}" "background_original.mp4"
-          download_asset "${{ github.event.client_payload.image_url }}" "overlay_original"
+          download_asset "${{ github.event.client_payload.audio_url }}" "audio_original" || true
+          download_asset "${{ github.event.client_payload.video_url }}" "background_original.mp4" || true
+          download_asset "${{ github.event.client_payload.image_url }}" "overlay_original" || true
 
       - name: Audio Processing
         run: |
@@ -189,6 +193,11 @@ jobs:
             if echo "$RESULT" | grep -q "^https://"; then VIDEO_URL="$RESULT"; break; fi
             sleep 10
           done
+          
+          if [ -z "$VIDEO_URL" ]; then
+            RESULT=$(curl -f -A "Mozilla/5.0" --connect-timeout 30 --max-time 300 -F "reqtype=fileupload" -F "fileToUpload=@output.mp4" "https://catbox.moe/user/api.php" 2>/dev/null) || RESULT=""
+            if echo "$RESULT" | grep -q "^https://"; then VIDEO_URL="$RESULT"; fi
+          fi
           
           if [ -n "$VIDEO_URL" ]; then echo "video_url=$VIDEO_URL" >> $GITHUB_OUTPUT; else echo "video_url=ARTIFACT" >> $GITHUB_OUTPUT; fi
           echo "upload_failed=$([ -n "$VIDEO_URL" ] && echo 'false' || echo 'true')" >> $GITHUB_OUTPUT
