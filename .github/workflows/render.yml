@@ -26,44 +26,450 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg bc file
           mkdir -p ~/.fonts
-          wget -q -O ~/.fonts/Montserrat-Black.ttf "https://github.com/google/fonts/raw/main/ofl/montserrat/static/Montserrat-Black.ttf" || true
+          wget -q -O ~/.fonts/Montserrat-Black.ttf \
+            "https://github.com/google/fonts/raw/main/ofl/montserrat/static/Montserrat-Black.ttf" || true
           fc-cache -f
 
-      - name: Download & Verify Assets
+      - name: Download Assets
         run: |
           download_asset() {
             local raw_url="$1"
             local output="$2"
-            local url=$(echo "$raw_url" | tr -d '\r\n" ' | sed 's/^undefined$//i' | sed 's/^null$//i')
-            if [ -z "$url" ]; then echo "⚠️ URL vacía para $output."; return 0; fi
-
-            echo "📥 Descargando $output..."
+            local url
+            url=$(echo "$raw_url" | tr -d '\r\n" ' | sed 's/^undefined$//i' | sed 's/^null$//i')
+            if [ -z "$url" ]; then
+              echo "⚠️ URL vacia para $output"
+              return 0
+            fi
+            echo "📥 Descargando $output desde $url"
             curl -L -f -A "Mozilla/5.0" --connect-timeout 20 --max-time 120 -o "$output" "$url" 2>/dev/null || true
             if [ -s "$output" ]; then
-              local mime=$(file -b --mime-type "$output" 2>/dev/null || echo "unknown")
-              if [[ "$mime" == text/html* ]]; then rm -f "$output"; fi
+              local mime
+              mime=$(file -b --mime-type "$output" 2>/dev/null || echo "unknown")
+              echo "   Tipo: $mime Tamaño: $(wc -c < "$output") bytes"
+              if echo "$mime" | grep -q "text/html"; then
+                echo "   ❌ Es HTML, descartando"
+                rm -f "$output"
+              fi
+            else
+              echo "   ⚠️ Archivo vacio o descarga fallida"
+              rm -f "$output"
             fi
             return 0
           }
           download_asset "${{ github.event.client_payload.audio_url }}" "audio_original"
           download_asset "${{ github.event.client_payload.video_url }}" "background_original.mp4"
           download_asset "${{ github.event.client_payload.image_url }}" "overlay_original"
+          echo "📋 Assets descargados:"
+          ls -la audio_original background_original.mp4 overlay_original 2>/dev/null || echo "Algunos assets no disponibles"
 
       - name: Audio Processing
         run: |
-          AUDIO_OK=false
+          AUDIO_OK="false"
+
           if [ -s "audio_original" ]; then
-            if ffmpeg -y -i audio_original -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null; then AUDIO_OK=true; fi
+            echo "🎵 Procesando audio descargado..."
+            if ffmpeg -y -i audio_original -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null; then
+              AUDIO_OK="true"
+              echo "✅ Audio convertido correctamente"
+            else
+              echo "⚠️ No se pudo convertir el audio descargado"
+            fi
           fi
-          
-          if [ "$AUDIO_OK" = false ]; then
-            echo "🎙️ Generando audio Edge-TTS..."
-            TEXTO="${SCRIPT_TEXT:-Generando audio de emergencia.}"
-            echo "$TEXTO" > /tmp/script.txt
-            edge-tts --voice "es-ES-AlvaroNeural" --rate="+5%" --pitch="-3Hz" --file /tmp/script.txt --write-media temp_tts.mp3 || true
-            ffmpeg -y -i temp_tts.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null || true
+
+          if [ "$AUDIO_OK" = "false" ]; then
+            echo "🎙️ Generando audio con Edge-TTS..."
+            SAFE_TEXT=$(echo "${SCRIPT_TEXT:-Generando audio de emergencia.}" | head -c 5000)
+            echo "$SAFE_TEXT" > /tmp/script.txt
+            edge-tts \
+              --voice "es-ES-AlvaroNeural" \
+              --rate="+5%" \
+              --pitch="-3Hz" \
+              --file /tmp/script.txt \
+              --write-media temp_tts.mp3 2>/dev/null || true
+
+            if [ -s "temp_tts.mp3" ]; then
+              ffmpeg -y -i temp_tts.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null || true
+              echo "✅ Audio TTS generado"
+            fi
           fi
-          
-          if [ ! -s "audio.wav" ]; then ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=mono -t 5 -c:a pcm_s16le audio.wav || true; fi
-          DURATION=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 audio.wav || echo "5")
-          if ! awk "BEGIN {exit !($DURATION > 0)}"; then DURATION=5
+
+          if [ ! -s "audio.wav" ]; then
+            echo "⚠️ Generando audio silencioso de emergencia"
+            ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=mono -t 5 -c:a pcm_s16le audio.wav 2>/dev/null || true
+          fi
+
+          DURATION=$(ffprobe -v quiet -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 audio.wav 2>/dev/null || echo "5")
+          if [ -z "$DURATION" ] || [ "$DURATION" = "N/A" ]; then
+            DURATION="5"
+          fi
+          echo "$DURATION" > /tmp/audio_duration.txt
+          echo "⏱️ Duracion del audio: ${DURATION}s"
+
+      - name: Visuals Processing
+        run: |
+          DURATION=$(cat /tmp/audio_duration.txt)
+          echo "🖼️ Procesando visuales para ${DURATION}s"
+
+          HAS_OVERLAY="false"
+          if [ -s "overlay_original" ]; then
+            echo "🖼️ Procesando imagen overlay..."
+            if ffprobe -v quiet overlay_original 2>/dev/null; then
+              ffmpeg -y -i overlay_original \
+                -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920" \
+                -pix_fmt rgba overlay.png 2>/dev/null
+              if [ -s "overlay.png" ]; then
+                HAS_OVERLAY="true"
+                echo "✅ Overlay procesado"
+              fi
+            fi
+          fi
+
+          if [ "$HAS_OVERLAY" = "false" ]; then
+            echo "⚠️ Generando overlay gradiente de emergencia..."
+            ffmpeg -y -f lavfi \
+              -i "color=c=black@0:s=1080x1920:d=1,format=rgba" \
+              -frames:v 1 overlay.png 2>/dev/null || true
+          fi
+
+          HAS_BG="false"
+          if [ -s "background_original.mp4" ]; then
+            echo "🎬 Verificando video de fondo..."
+            if ffprobe -v quiet background_original.mp4 2>/dev/null; then
+              cp background_original.mp4 background.mp4
+              HAS_BG="true"
+              echo "✅ Video de fondo OK"
+            fi
+          fi
+
+          if [ "$HAS_BG" = "false" ]; then
+            echo "⚠️ Generando fondo oscuro animado..."
+            ffmpeg -y -f lavfi \
+              -i "color=c=0x0a0e27:s=1080x1920:d=${DURATION}:r=30,format=yuv420p" \
+              -vf "vignette=PI/2.5,noise=alls=3:allf=t,eq=brightness=-0.05:contrast=1.15:saturation=0.4" \
+              -c:v libx264 -preset ultrafast -crf 28 \
+              -t "$DURATION" background.mp4 2>/dev/null || true
+            echo "✅ Fondo generado"
+          fi
+
+          echo "HAS_OVERLAY=$HAS_OVERLAY" >> $GITHUB_ENV
+          echo "HAS_BG=$HAS_BG" >> $GITHUB_ENV
+
+      - name: Transcribe and Subtitles
+        run: |
+          echo "📝 Transcribiendo audio..."
+          whisper audio.wav \
+            --model small \
+            --language "${LANG_CODE}" \
+            --output_format json \
+            --word_timestamps True \
+            --output_dir . 2>/dev/null || true
+
+          cat << 'PYEOF' > gen_subs.py
+          import json, os, sys
+
+          def generate_subs():
+              if not os.path.exists("audio.json"):
+                  print("⚠️ No hay transcripcion")
+                  return False
+
+              with open("audio.json", "r") as f:
+                  data = json.load(f)
+
+              words = []
+              for seg in data.get("segments", []):
+                  for w in seg.get("words", []):
+                      if w.get("word", "").strip():
+                          words.append(w)
+
+              if len(words) < 2:
+                  print("⚠️ Muy pocas palabras detectadas")
+                  return False
+
+              header = """[Script Info]
+          ScriptType: v4.00+
+          PlayResX: 1080
+          PlayResY: 1920
+
+          [V4+ Styles]
+          Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+          Style: Default,Montserrat Black,80,&H00FFFFFF,&H0000D7FF,&H00000000,&HBB000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,538,1
+
+          [Events]
+          Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+          """
+
+              def fmt(s):
+                  h = int(s // 3600)
+                  m = int((s % 3600) // 60)
+                  sec = int(s % 60)
+                  cs = min(int(round((s % 1) * 100)), 99)
+                  return f"{h}:{m:02d}:{sec:02d}.{cs:02d}"
+
+              lines = []
+              for i in range(0, len(words), 3):
+                  chunk = words[i:i+3]
+                  if not chunk:
+                      continue
+                  for j, cw in enumerate(chunk):
+                      parts = []
+                      for k, w in enumerate(chunk):
+                          clean = w["word"].strip().upper().replace("{","").replace("}","")
+                          if k == j:
+                              parts.append("{\\c&H0000D7FF\\fscx110\\fscy110}" + clean + "{\\c&H00FFFFFF\\fscx100\\fscy100}")
+                          else:
+                              parts.append(clean)
+                      start = fmt(cw["start"])
+                      end = fmt(cw["end"])
+                      lines.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{' '.join(parts)}")
+
+              with open("subtitles.ass", "w") as f:
+                  f.write(header)
+                  for line in lines:
+                      f.write(line + "\n")
+
+              print(f"✅ Subtitulos generados: {len(lines)} lineas")
+              return True
+
+          try:
+              if not generate_subs():
+                  raise Exception("Fallback")
+          except Exception as e:
+              print(f"⚠️ Error subtitulos: {e}")
+              fallback = """[Script Info]
+          ScriptType: v4.00+
+          PlayResX: 1080
+          PlayResY: 1920
+
+          [V4+ Styles]
+          Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+          Style: Default,Montserrat,80,&H00FFFFFF,&H0000D7FF,&H00000000,&HBB000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,538,1
+
+          [Events]
+          Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+          Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,
+          """
+              with open("subtitles.ass", "w") as f:
+                  f.write(fallback)
+          PYEOF
+
+          python3 gen_subs.py
+
+          echo "📋 Verificacion subtitulos:"
+          if [ -s "subtitles.ass" ]; then
+            DIALOGS=$(grep -c "^Dialogue:" subtitles.ass || echo "0")
+            echo "   Dialogos: $DIALOGS"
+          else
+            echo "   ⚠️ Sin subtitulos"
+          fi
+
+      - name: Render Video
+        run: |
+          DURATION=$(cat /tmp/audio_duration.txt)
+          SAFE_DUR=$(printf '%.2f' "$DURATION")
+          FRAMES=$(echo "$DURATION * 30" | bc | awk '{print int($1+0.5)}')
+
+          if [ "$FRAMES" -lt 30 ]; then
+            FRAMES=150
+          fi
+
+          echo "🎬 ═══════════════════════════════════"
+          echo "🎬 RENDER CON KEN BURNS DINAMICO"
+          echo "🎬 ═══════════════════════════════════"
+          echo "   Duracion: ${SAFE_DUR}s"
+          echo "   Frames: ${FRAMES}"
+          echo "   Ken Burns: 1.0x → 1.12x (zoom in sutil)"
+          echo ""
+
+          echo "🎬 Intentando render COMPLETO (Ken Burns + B-Roll + Subtitulos)..."
+          ffmpeg -y \
+            -stream_loop -1 -i background.mp4 \
+            -loop 1 -i overlay.png \
+            -i audio.wav \
+            -filter_complex "\
+              [0:v]scale=1080:1920:force_original_aspect_ratio=increase,\
+              crop=1080:1920,setsar=1,\
+              eq=brightness=-0.08:saturation=0.9,\
+              format=rgba,\
+              colorchannelmixer=aa=0.15[pex];\
+              [1:v]scale=8000:-1,\
+              zoompan=\
+                z='min(1.0+0.12*on/${FRAMES},1.12)':\
+                x='iw/2-(iw/zoom/2)':\
+                y='ih/2-(ih/zoom/2)':\
+                d=${FRAMES}:\
+                s=1080x1920:\
+                fps=30[flux];\
+              [flux][pex]overlay=0:0[merged];\
+              [merged]ass=subtitles.ass[withsubs];\
+              [withsubs]drawbox=\
+                x=0:y=0:\
+                w='min(iw,iw*t/${SAFE_DUR})':\
+                h=10:\
+                color=0xFFD700@0.95:\
+                t=fill[final]" \
+            -map "[final]" \
+            -map 2:a \
+            -c:v libx264 \
+            -preset medium \
+            -crf 23 \
+            -pix_fmt yuv420p \
+            -c:a aac \
+            -b:a 192k \
+            -ar 44100 \
+            -movflags +faststart \
+            -t "$DURATION" \
+            output.mp4 2>/tmp/ffmpeg_full.log
+
+          RENDER_OK=$?
+
+          if [ $RENDER_OK -ne 0 ]; then
+            echo "⚠️ Render completo fallo. Intentando sin subtitulos..."
+            tail -5 /tmp/ffmpeg_full.log 2>/dev/null || true
+
+            ffmpeg -y \
+              -stream_loop -1 -i background.mp4 \
+              -loop 1 -i overlay.png \
+              -i audio.wav \
+              -filter_complex "\
+                [0:v]scale=1080:1920:force_original_aspect_ratio=increase,\
+                crop=1080:1920,setsar=1[bg];\
+                [1:v]scale=8000:-1,\
+                zoompan=\
+                  z='min(1.0+0.12*on/${FRAMES},1.12)':\
+                  x='iw/2-(iw/zoom/2)':\
+                  y='ih/2-(ih/zoom/2)':\
+                  d=${FRAMES}:\
+                  s=1080x1920:\
+                  fps=30[flux];\
+                [flux][bg]overlay=0:0:shortest=1[final]" \
+              -map "[final]" \
+              -map 2:a \
+              -c:v libx264 \
+              -preset medium \
+              -crf 23 \
+              -pix_fmt yuv420p \
+              -c:a aac \
+              -b:a 192k \
+              -ar 44100 \
+              -movflags +faststart \
+              -t "$DURATION" \
+              output.mp4 2>/tmp/ffmpeg_nosub.log
+
+            RENDER_OK=$?
+          fi
+
+          if [ $RENDER_OK -ne 0 ]; then
+            echo "⚠️ Render Ken Burns fallo. Intentando render basico..."
+            tail -5 /tmp/ffmpeg_nosub.log 2>/dev/null || true
+
+            ffmpeg -y \
+              -stream_loop -1 -i background.mp4 \
+              -i audio.wav \
+              -filter_complex "\
+                [0:v]scale=1080:1920:force_original_aspect_ratio=increase,\
+                crop=1080:1920,setsar=1[final]" \
+              -map "[final]" \
+              -map 1:a \
+              -c:v libx264 \
+              -preset ultrafast \
+              -crf 25 \
+              -pix_fmt yuv420p \
+              -c:a aac \
+              -b:a 192k \
+              -t "$DURATION" \
+              output.mp4 2>/dev/null
+
+            RENDER_OK=$?
+          fi
+
+          if [ $RENDER_OK -ne 0 ] || [ ! -s "output.mp4" ]; then
+            echo "❌ TODOS los renders fallaron. Generando video minimo..."
+            ffmpeg -y \
+              -f lavfi -i "color=c=black:s=1080x1920:d=${DURATION}:r=30" \
+              -i audio.wav \
+              -c:v libx264 -preset ultrafast -crf 28 -pix_fmt yuv420p \
+              -c:a aac -b:a 128k \
+              -t "$DURATION" \
+              -shortest \
+              output.mp4 2>/dev/null || true
+          fi
+
+          if [ -s "output.mp4" ]; then
+            SIZE=$(du -h output.mp4 | cut -f1)
+            echo ""
+            echo "═══════���═══════════════════════════"
+            echo "✅ RENDER COMPLETADO"
+            echo "   Archivo: output.mp4"
+            echo "   Tamaño: $SIZE"
+            echo "═══════════════════════════════════"
+          else
+            echo "❌ No se genero ningun video"
+            exit 1
+          fi
+
+      - name: Upload Video
+        id: upload
+        run: |
+          echo "📤 Subiendo video final..."
+          VIDEO_URL=""
+
+          for i in 1 2 3; do
+            echo "   Intento $i/3..."
+            URL=$(curl -f \
+              -A "Mozilla/5.0" \
+              --connect-timeout 30 \
+              --max-time 300 \
+              -F "reqtype=fileupload" \
+              -F "time=24h" \
+              -F "fileToUpload=@output.mp4" \
+              "https://litterbox.catbox.moe/resources/internals/api.php" 2>/dev/null || echo "")
+
+            if echo "$URL" | grep -q "^https://"; then
+              VIDEO_URL="$URL"
+              echo "   ✅ Subido: $VIDEO_URL"
+              break
+            else
+              echo "   ⚠️ Fallo, esperando ${i}0s..."
+              sleep "${i}0"
+            fi
+          done
+
+          if [ -n "$VIDEO_URL" ]; then
+            echo "video_url=$VIDEO_URL" >> $GITHUB_OUTPUT
+          else
+            echo "video_url=UPLOAD_FAILED" >> $GITHUB_OUTPUT
+            echo "❌ No se pudo subir el video"
+          fi
+
+      - name: Upload Artifact Backup
+        if: steps.upload.outputs.video_url == 'UPLOAD_FAILED'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rendered-video
+          path: output.mp4
+          retention-days: 1
+
+      - name: Send Webhook
+        if: always()
+        run: |
+          WEBHOOK_URL="${{ secrets.WEBHOOK_URL }}"
+          if [ -z "$WEBHOOK_URL" ]; then
+            echo "⚠️ No hay webhook configurado"
+            exit 0
+          fi
+
+          VIDEO_RESULT="${{ steps.upload.outputs.video_url }}"
+
+          if [ "$VIDEO_RESULT" != "UPLOAD_FAILED" ] && [ -n "$VIDEO_RESULT" ]; then
+            STATUS="completed"
+          else
+            STATUS="failed"
+          fi
+
+          echo "📡 Enviando webhook (status: $STATUS)..."
+          curl -sf -X POST "$WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{\"status\":\"$STATUS\",\"video_url\":\"$VIDEO_RESULT\"}" 2>/dev/null || true
+          echo "✅ Webhook enviado"
