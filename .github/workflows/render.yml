@@ -203,17 +203,17 @@ jobs:
           DURATION=$(cat /tmp/duration.txt)
           SAFE_DUR=$(printf '%.2f' "$DURATION")
 
-          # INTENTO 1: COMPLETO (IA + Pexels + Subs + Barra)
+          # INTENTO 1: FUERZA BRUTA MATEMÁTICA (85% IA + 15% Pexels)
           if [ "${{ env.HAS_KB }}" = "true" ] && [ "${{ env.HAS_DARKBG }}" = "true" ]; then
-            echo "🎥 INTENTO 1: Mezcla Elite"
+            echo "🎥 INTENTO 1: Mezcla Matemática"
             ffmpeg -y \
               -i ken_burns.mp4 \
               -i bg_dark.mp4 \
               -i audio.wav \
               -filter_complex "\
-                [0:v]setsar=1[main]; \
-                [1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=rgba,colorchannelmixer=aa=0.20[texture]; \
-                [main][texture]overlay=0:0:shortest=1[mixed]; \
+                [0:v]format=yuv420p,setsar=1[main]; \
+                [1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,format=yuv420p,setsar=1[texture]; \
+                [main][texture]blend=all_expr='A*0.85+B*0.15'[mixed]; \
                 [mixed]ass=subtitles.ass[withsubs]; \
                 [withsubs]drawbox=x=0:y=0:w='min(iw\,iw*t/${SAFE_DUR})':h=10:color=0xFFD700@0.9:t=fill[final]" \
               -map "[final]" -map 2:a \
@@ -223,15 +223,15 @@ jobs:
               output.mp4 2>/dev/null && echo "✅ RENDER COMPLETADO" && exit 0
           fi
 
-          # INTENTO 2: IA + Pexels (sin subs)
+          # INTENTO 2: FUERZA BRUTA MATEMÁTICA (sin subs)
           if [ "${{ env.HAS_KB }}" = "true" ] && [ "${{ env.HAS_DARKBG }}" = "true" ]; then
-            echo "🎥 INTENTO 2: IA + Pexels"
+            echo "🎥 INTENTO 2: Mezcla Matemática (sin subs)"
             ffmpeg -y \
               -i ken_burns.mp4 -i bg_dark.mp4 -i audio.wav \
               -filter_complex "\
-                [0:v]setsar=1[main]; \
-                [1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=rgba,colorchannelmixer=aa=0.20[texture]; \
-                [main][texture]overlay=0:0:shortest=1[final]" \
+                [0:v]format=yuv420p,setsar=1[main]; \
+                [1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,format=yuv420p,setsar=1[texture]; \
+                [main][texture]blend=all_expr='A*0.85+B*0.15'[final]" \
               -map "[final]" -map 2:a \
               -c:v libx264 -preset medium -crf 20 -pix_fmt yuv420p \
               -c:a aac -b:a 192k -movflags +faststart -t "$DURATION" \
