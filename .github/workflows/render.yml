@@ -32,77 +32,81 @@ jobs:
           fc-cache -f
           echo "✅ Dependencias instaladas"
 
-      # ── Descargar Assets (Con Salvavidas) ──
       - name: Download assets
         run: |
           download() {
-            local url="$1" output="$2" attempt=1
-            
-            # Limpiar la URL de basura o textos vacíos
-            url=$(echo "$url" | tr -d '"' | tr -d ' ' | sed 's/undefined//g' | sed 's/null//g')
-            
-            # El Salvavidas: Si la URL está vacía, usamos un archivo de emergencia
-            if [ -z "$url" ]; then
-              echo "⚠️ URL rota o vacía para $output. Usando salvavidas..."
-              if [ "$output" = "background.mp4" ]; then
-                url="https://videos.pexels.com/video-files/3129671/3129671-hd_1080_1920_30fps.mp4"
-              elif [ "$output" = "overlay.png" ]; then
-                url="https://images.pexels.com/photos/3124111/pexels-photo-3124111.jpeg"
-              fi
+            local url="$1"
+            local output="$2"
+            echo "📥 Descargando $output..."
+            if curl -L -f --connect-timeout 30 --max-time 120 -o "$output" "$url"; then
+              echo "✅ $output listo"
+            else
+              echo "⚠️ Falló la descarga de $output. No es crítico, pero el render podría fallar."
             fi
-
-            while [ $attempt -le 3 ]; do
-              echo "📥 Descargando $output..."
-              if curl -L -f --connect-timeout 30 --max-time 120 -o "$output" "$url"; then
-                local size=$(stat --printf="%s" "$output" 2>/dev/null || echo "0")
-                if [ "$size" -gt 1000 ]; then
-                  echo "✅ $output listo"
-                  return 0
-                fi
-              fi
-              sleep 5
-              attempt=$((attempt + 1))
-            done
-            return 0
           }
           download "${{ github.event.client_payload.audio_url }}" "audio.wav"
           download "${{ github.event.client_payload.video_url }}" "background.mp4"
           download "${{ github.event.client_payload.image_url }}" "overlay.png"
 
-      # ── Whisper ──
+      - name: TTS fallback
+        if: hashFiles('audio.wav') == ''
+        run: |
+          echo "⚠️ Audio no disponible. Generando con Edge-TTS..."
+          echo '${{ github.event.client_payload.script_text }}' > script.txt
+          edge-tts --voice "es-ES-AlvaroNeural" --rate "+5%" --pitch "-3Hz" --file script.txt --write-media audio.wav
+          echo "✅ Audio generado con Edge-TTS"
+
       - name: Transcribe
         run: |
-          whisper audio.wav --model small --language ${{ github.event.client_payload.language || 'es' }} --output_format json --word_timestamps True --output_dir . || true
+          # Solo transcribimos si el archivo de audio es mayor de 1KB
+          if [ $(stat -c%s audio.wav) -gt 1024 ]; then
+            whisper audio.wav --model small --language ${{ github.event.client_payload.language || 'es' }} --output_format json --word_timestamps True --output_dir .
+          else
+            echo "⚠️ Audio demasiado corto. Usando subtítulos vacíos."
+            echo '[{"start":0,"end":10,"text":"Audio Error"}]' > audio.json
+          fi
 
-      # ── Subtítulos ──
       - name: Generate subtitles
-        run: python generate_subs.py || true
+        run: python generate_subs.py
 
-      # ── Render FFmpeg ──
       - name: Render video
         run: |
+          echo "🛠 Verificando archivos para el render..."
+          ls -lh audio.wav background.mp4 overlay.png subtitles.ass
           chmod +x render.sh
-          bash render.sh
+          # Usamos bash render.sh pero no paramos el flujo si FFmpeg falla, 
+          # para poder hacer el upload y el webhook
+          bash render.sh || true
+          echo "🛠 Render finalizado."
 
-      # ── Upload y Webhook de vuelta ──
       - name: Upload result
         id: upload
         run: |
-          URL=$(curl -f -F "reqtype=fileupload" -F "time=24h" -F "fileToUpload=@output.mp4" https://litterbox.catbox.moe/resources/internals/api.php 2>/dev/null || echo "")
+          for i in 1 2 3; do
+            echo "📤 Litterbox (intento $i/3)..."
+            URL=$(curl -f --max-time 180 -F "reqtype=fileupload" -F "time=24h" -F "fileToUpload=@output.mp4" https://litterbox.catbox.moe/resources/internals/api.php 2>/dev/null) \
+              && echo "$URL" | grep -q "^https://" \
+              && { echo "video_url=$URL" >> $GITHUB_OUTPUT; echo "✅ $URL"; exit 0; }
+            sleep 15
+          done
+          echo "📤 Fallback: Catbox permanente..."
+          URL=$(curl -f --max-time 300 -F "reqtype=fileupload" -F "fileToUpload=@output.mp4" https://catbox.moe/user/api.php 2>/dev/null)
           if echo "$URL" | grep -q "^https://"; then
             echo "video_url=$URL" >> $GITHUB_OUTPUT
             echo "✅ $URL"
           else
-            URL=$(curl -f -F "reqtype=fileupload" -F "fileToUpload=@output.mp4" https://catbox.moe/user/api.php 2>/dev/null || echo "")
-            echo "video_url=$URL" >> $GITHUB_OUTPUT
+            echo "❌ Ambos servicios fallaron"
+            exit 1
           fi
 
       - name: Notify Activepieces
         if: always()
         run: |
           if [ -n "${{ steps.upload.outputs.video_url }}" ]; then
-            PAYLOAD="{\"status\":\"completed\",\"video_url\":\"${{ steps.upload.outputs.video_url }}\"}"
+            STATUS="completed"
+            PAYLOAD="{\"status\":\"$STATUS\",\"video_url\":\"${{ steps.upload.outputs.video_url }}\",\"title\":\"${{ github.event.client_payload.title }}\",\"description\":\"${{ github.event.client_payload.description }}\"}"
           else
-            PAYLOAD="{\"status\":\"failed\"}"
+            STATUS="failed"
+            PAYLOAD="{\"status\":\"$STATUS\",\"error\":\"Render o upload falló\"}"
           fi
-          curl -sf -X POST "${{ secrets.WEBHOOK_URL }}" -H "Content-Type: application/json" -d "$PAYLOAD" || true
+          curl -sf -X POST "${{ secrets.WEBHOOK_URL }}" -H "Content-Type: application/json" -d "$PAYLOAD" || echo "⚠️ Webhook falló"
