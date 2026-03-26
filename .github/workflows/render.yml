@@ -48,11 +48,10 @@ jobs:
               mime=$(file -b --mime-type "$output" 2>/dev/null || echo "unknown")
               echo "   Tipo: $mime Tamaño: $(wc -c < "$output") bytes"
               if echo "$mime" | grep -q "text/html"; then
-                echo "   ❌ Es HTML no un archivo real"
+                echo "   ❌ Es HTML"
                 rm -f "$output"
               fi
             else
-              echo "   ⚠️ Descarga fallida"
               rm -f "$output"
             fi
             return 0
@@ -61,10 +60,7 @@ jobs:
           download_asset "${{ github.event.client_payload.audio_url }}" "audio_original"
           download_asset "${{ github.event.client_payload.video_url }}" "background_original.mp4"
           download_asset "${{ github.event.client_payload.image_url }}" "overlay_original"
-
-          echo ""
-          echo "📋 Assets descargados:"
-          ls -la audio_original background_original.mp4 overlay_original 2>/dev/null || echo "Algunos assets no disponibles"
+          ls -la audio_original background_original.mp4 overlay_original 2>/dev/null || true
 
       - name: Audio Processing
         run: |
@@ -79,17 +75,15 @@ jobs:
           fi
 
           if [ "$AUDIO_OK" = "false" ]; then
-            echo "🎙️ Generando audio con Edge-TTS Alvaro..."
+            echo "🎙️ Generando audio con Edge-TTS..."
             SAFE_TEXT=$(echo "${SCRIPT_TEXT:-Contenido de tecnologia}" | head -c 5000)
             echo "$SAFE_TEXT" > /tmp/script.txt
-
             edge-tts \
               --voice "es-ES-AlvaroNeural" \
               --rate="+5%" \
               --pitch="-3Hz" \
               --file /tmp/script.txt \
               --write-media temp_tts.mp3 2>/dev/null || true
-
             if [ -s "temp_tts.mp3" ]; then
               ffmpeg -y -i temp_tts.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null || true
               echo "✅ Audio TTS generado"
@@ -109,55 +103,81 @@ jobs:
           echo "$DURATION" > /tmp/audio_duration.txt
           echo "⏱️ Duracion: ${DURATION}s"
 
-      - name: Prepare Image
+      - name: Prepare Image for Ken Burns
         run: |
-          echo "🖼️ Preparando imagen para Ken Burns..."
+          echo "🖼️ Preparando imagen..."
 
           if [ -s "overlay_original" ]; then
-            echo "   Convirtiendo imagen a JPG (sin canal alfa)..."
             ffmpeg -y -i overlay_original \
               -vf "scale=4320:7680:force_original_aspect_ratio=decrease,pad=4320:7680:(ow-iw)/2:(oh-ih)/2:black" \
               -pix_fmt yuvj420p \
               overlay_large.jpg 2>/dev/null
 
             if [ -s "overlay_large.jpg" ]; then
-              echo "   ✅ Imagen preparada: $(wc -c < overlay_large.jpg) bytes"
+              echo "✅ Imagen lista ($(du -h overlay_large.jpg | cut -f1))"
               echo "HAS_IMAGE=true" >> $GITHUB_ENV
             else
-              echo "   ⚠️ Conversion fallo"
+              echo "⚠️ Conversion fallo"
               echo "HAS_IMAGE=false" >> $GITHUB_ENV
             fi
           else
-            echo "   ⚠️ No hay imagen"
+            echo "⚠️ No hay imagen"
             echo "HAS_IMAGE=false" >> $GITHUB_ENV
           fi
 
       - name: Prepare Background
         run: |
           DURATION=$(cat /tmp/audio_duration.txt)
+          HAS_BG="false"
 
           if [ -s "background_original.mp4" ]; then
-            echo "🎬 Verificando video de fondo..."
             if ffprobe -v quiet background_original.mp4 2>/dev/null; then
-              echo "   ✅ Video de fondo OK"
-              echo "HAS_BG=true" >> $GITHUB_ENV
-            else
-              echo "   ⚠️ Video corrupto"
-              echo "HAS_BG=false" >> $GITHUB_ENV
+              HAS_BG="true"
+              echo "✅ Video de fondo OK"
             fi
-          else
-            echo "   ⚠️ No hay video de fondo"
-            echo "HAS_BG=false" >> $GITHUB_ENV
           fi
 
-          if [ "${{ env.HAS_BG }}" != "true" ] && [ ! -s "background_original.mp4" ] || ! ffprobe -v quiet background_original.mp4 2>/dev/null; then
+          if [ "$HAS_BG" = "false" ]; then
             echo "🎨 Generando fondo oscuro..."
             ffmpeg -y -f lavfi \
               -i "color=c=0x0a0e27:s=1080x1920:d=${DURATION}:r=30" \
               -vf "vignette=PI/2.5,noise=alls=3:allf=t,eq=brightness=-0.05:contrast=1.15" \
               -c:v libx264 -preset ultrafast -crf 28 -pix_fmt yuv420p \
               -t "$DURATION" background_original.mp4 2>/dev/null || true
-            echo "   ✅ Fondo generado"
+            echo "✅ Fondo generado"
+          fi
+
+          echo "HAS_BG=$HAS_BG" >> $GITHUB_ENV
+
+      - name: Create Ken Burns Video
+        run: |
+          DURATION=$(cat /tmp/audio_duration.txt)
+          FRAMES=$(echo "$DURATION * 30" | bc | awk '{print int($1+0.5)}')
+          if [ "$FRAMES" -lt 30 ]; then FRAMES=150; fi
+
+          echo "🎥 Generando Ken Burns (${FRAMES} frames)..."
+
+          if [ "${{ env.HAS_IMAGE }}" = "true" ] && [ -s "overlay_large.jpg" ]; then
+            ffmpeg -y \
+              -i overlay_large.jpg \
+              -filter_complex \
+              "[0:v]zoompan=z='min(1.0+0.12*on/${FRAMES},1.12)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${FRAMES}:s=1080x1920:fps=30,format=yuv420p[final]" \
+              -map "[final]" \
+              -c:v libx264 -preset fast -crf 20 -pix_fmt yuv420p \
+              -t "$DURATION" \
+              ken_burns.mp4 2>/tmp/kb.log
+
+            if [ $? -eq 0 ] && [ -s "ken_burns.mp4" ]; then
+              echo "✅ Ken Burns generado ($(du -h ken_burns.mp4 | cut -f1))"
+              echo "HAS_KB=true" >> $GITHUB_ENV
+            else
+              echo "⚠️ Ken Burns fallo"
+              tail -5 /tmp/kb.log 2>/dev/null || true
+              echo "HAS_KB=false" >> $GITHUB_ENV
+            fi
+          else
+            echo "⚠️ Sin imagen, saltando Ken Burns"
+            echo "HAS_KB=false" >> $GITHUB_ENV
           fi
 
       - name: Transcribe and Subtitles
@@ -176,16 +196,13 @@ jobs:
           def generate():
               if not os.path.exists("audio.json"):
                   return False
-
               with open("audio.json", "r") as f:
                   data = json.load(f)
-
               words = []
               for seg in data.get("segments", []):
                   for w in seg.get("words", []):
                       if w.get("word", "").strip():
                           words.append(w)
-
               if len(words) < 2:
                   return False
 
@@ -225,15 +242,14 @@ jobs:
                   f.write(header)
                   for line in lines:
                       f.write(line + "\n")
-
               print(f"✅ {len(lines)} lineas de subtitulos")
               return True
 
           try:
               if not generate():
-                  raise Exception("no subs")
+                  raise Exception("sin datos")
           except Exception as e:
-              print(f"⚠️ Subtitulos fallback: {e}")
+              print(f"⚠️ Fallback: {e}")
               fb = "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n\n"
               fb += "[V4+ Styles]\n"
               fb += "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
@@ -247,133 +263,152 @@ jobs:
 
           python3 gen_subs.py
 
-      - name: Render Video
+      - name: Render Final Video
         run: |
           DURATION=$(cat /tmp/audio_duration.txt)
           SAFE_DUR=$(printf '%.2f' "$DURATION")
-          FRAMES=$(echo "$DURATION * 30" | bc | awk '{print int($1+0.5)}')
-          if [ "$FRAMES" -lt 30 ]; then FRAMES=150; fi
 
           echo "🎬 ═══════════════════════════════════"
-          echo "🎬 RENDER FINAL"
+          echo "🎬 RENDER FINAL — COMPOSICION POR CAPAS"
           echo "   Duracion: ${SAFE_DUR}s"
-          echo "   Frames: ${FRAMES}"
-          echo "   Imagen: ${{ env.HAS_IMAGE }}"
+          echo "   Ken Burns: ${{ env.HAS_KB }}"
           echo "🎬 ═══════════════════════════════════"
 
           RENDER_OK="false"
 
-          # ═══════════════════════════════════════════════
-          # INTENTO 1: Imagen con Ken Burns + Fondo + Subs
-          # ═══════════════════════════════════════════════
-          if [ "${{ env.HAS_IMAGE }}" = "true" ] && [ -s "overlay_large.jpg" ]; then
+          # ═══════════════════════════════════════════════════
+          # INTENTO 1: Ken Burns + Fondo Pexels + Subs + Barra
+          # Estrategia: Ken Burns ya es un VIDEO (ken_burns.mp4)
+          # Lo mezclamos con el fondo como dos videos normales
+          # SIN problemas de alfa
+          # ═══════════════════════════════════════════════════
+          if [ "${{ env.HAS_KB }}" = "true" ] && [ -s "ken_burns.mp4" ]; then
             echo ""
-            echo "🎥 INTENTO 1: Ken Burns + Fondo + Subtitulos"
+            echo "🎥 INTENTO 1: Completo (KB + Fondo + Subs + Barra)"
 
             ffmpeg -y \
+              -i ken_burns.mp4 \
               -stream_loop -1 -i background_original.mp4 \
-              -i overlay_large.jpg \
               -i audio.wav \
-              -filter_complex \
-              "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[bg]; \
-               [1:v]zoompan=z='min(1.0+0.12*on/${FRAMES},1.12)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${FRAMES}:s=1080x1920:fps=30[zoomed]; \
-               [bg]format=yuva420p,colorchannelmixer=aa=0.15[bgfade]; \
-               [zoomed][bgfade]overlay=0:0[merged]; \
-               [merged]ass=subtitles.ass[withsubs]; \
-               [withsubs]drawbox=x=0:y=0:w='min(iw\,iw*t/${SAFE_DUR})':h=8:color=0xFFD700@0.9:t=fill[final]" \
+              -filter_complex "\
+                [1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=yuva420p,colorchannelmixer=aa=0.12[bg]; \
+                [0:v]setsar=1[main]; \
+                [main][bg]overlay=0:0:format=yuv420[merged]; \
+                [merged]ass=subtitles.ass[withsubs]; \
+                [withsubs]drawbox=x=0:y=0:w='min(iw\,iw*t/${SAFE_DUR})':h=8:color=0xFFD700@0.9:t=fill[final]" \
               -map "[final]" \
               -map 2:a \
               -c:v libx264 -preset medium -crf 23 -pix_fmt yuv420p \
               -c:a aac -b:a 192k -ar 44100 \
               -movflags +faststart \
               -t "$DURATION" \
-              output.mp4 2>/tmp/render1.log
+              output.mp4 2>/tmp/r1.log
 
             if [ $? -eq 0 ] && [ -s "output.mp4" ]; then
               RENDER_OK="true"
-              echo "   ✅ Render completo exitoso"
+              echo "   ✅ RENDER COMPLETO EXITOSO"
             else
-              echo "   ⚠️ Fallo. Log:"
-              tail -8 /tmp/render1.log 2>/dev/null || true
+              echo "   ⚠️ Fallo"
+              tail -5 /tmp/r1.log 2>/dev/null || true
             fi
           fi
 
-          # ═══════════════════════════════════════════════
-          # INTENTO 2: Imagen con Ken Burns + Fondo (sin subs)
-          # ═══════════════════════════════════════════════
-          if [ "$RENDER_OK" = "false" ] && [ "${{ env.HAS_IMAGE }}" = "true" ] && [ -s "overlay_large.jpg" ]; then
+          # ═══════════════════════════════════════════════════
+          # INTENTO 2: Ken Burns + Fondo (sin subtitulos)
+          # ═══════════════════════════════════════════════════
+          if [ "$RENDER_OK" = "false" ] && [ "${{ env.HAS_KB }}" = "true" ] && [ -s "ken_burns.mp4" ]; then
             echo ""
-            echo "🎥 INTENTO 2: Ken Burns + Fondo (sin subtitulos)"
+            echo "🎥 INTENTO 2: KB + Fondo (sin subs)"
 
             ffmpeg -y \
+              -i ken_burns.mp4 \
               -stream_loop -1 -i background_original.mp4 \
-              -i overlay_large.jpg \
               -i audio.wav \
-              -filter_complex \
-              "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[bg]; \
-               [1:v]zoompan=z='min(1.0+0.12*on/${FRAMES},1.12)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${FRAMES}:s=1080x1920:fps=30[zoomed]; \
-               [bg]format=yuva420p,colorchannelmixer=aa=0.15[bgfade]; \
-               [zoomed][bgfade]overlay=0:0[final]" \
+              -filter_complex "\
+                [1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=yuva420p,colorchannelmixer=aa=0.12[bg]; \
+                [0:v]setsar=1[main]; \
+                [main][bg]overlay=0:0:format=yuv420[final]" \
               -map "[final]" \
               -map 2:a \
               -c:v libx264 -preset medium -crf 23 -pix_fmt yuv420p \
               -c:a aac -b:a 192k -ar 44100 \
               -movflags +faststart \
               -t "$DURATION" \
-              output.mp4 2>/tmp/render2.log
+              output.mp4 2>/tmp/r2.log
 
             if [ $? -eq 0 ] && [ -s "output.mp4" ]; then
               RENDER_OK="true"
-              echo "   ✅ Render sin subs exitoso"
+              echo "   ✅ KB + Fondo exitoso"
             else
-              echo "   ⚠️ Fallo. Log:"
-              tail -8 /tmp/render2.log 2>/dev/null || true
+              echo "   ⚠️ Fallo"
+              tail -5 /tmp/r2.log 2>/dev/null || true
             fi
           fi
 
-          # ═══════════════════════════════════════════════
-          # INTENTO 3: Solo imagen con Ken Burns (sin fondo)
-          # ═══════════════════════════════════════════════
-          if [ "$RENDER_OK" = "false" ] && [ "${{ env.HAS_IMAGE }}" = "true" ] && [ -s "overlay_large.jpg" ]; then
+          # ═══════════════════════════════════════════════════
+          # INTENTO 3: Solo Ken Burns + Audio + Subs
+          # ═══════════════════════════════════════════════════
+          if [ "$RENDER_OK" = "false" ] && [ "${{ env.HAS_KB }}" = "true" ] && [ -s "ken_burns.mp4" ]; then
             echo ""
-            echo "🎥 INTENTO 3: Solo imagen con Ken Burns"
+            echo "🎥 INTENTO 3: Solo KB + Audio + Subs"
 
             ffmpeg -y \
-              -i overlay_large.jpg \
+              -i ken_burns.mp4 \
               -i audio.wav \
-              -filter_complex \
-              "[0:v]zoompan=z='min(1.0+0.12*on/${FRAMES},1.12)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${FRAMES}:s=1080x1920:fps=30[final]" \
+              -filter_complex "\
+                [0:v]ass=subtitles.ass[final]" \
               -map "[final]" \
               -map 1:a \
               -c:v libx264 -preset medium -crf 23 -pix_fmt yuv420p \
               -c:a aac -b:a 192k -ar 44100 \
               -movflags +faststart \
               -t "$DURATION" \
-              output.mp4 2>/tmp/render3.log
+              output.mp4 2>/tmp/r3.log
 
             if [ $? -eq 0 ] && [ -s "output.mp4" ]; then
               RENDER_OK="true"
-              echo "   ✅ Render solo imagen exitoso"
+              echo "   ✅ KB + Audio exitoso"
             else
-              echo "   ⚠️ Fallo. Log:"
-              tail -8 /tmp/render3.log 2>/dev/null || true
+              echo "   ⚠️ Fallo"
+              tail -5 /tmp/r3.log 2>/dev/null || true
             fi
           fi
 
-          # ═══════════════════════════════════════════════
-          # INTENTO 4: Fondo con audio (sin imagen)
-          # ═══════════════════════════════════════════════
+          # ═══════════════════════════════════════════════════
+          # INTENTO 4: Solo Ken Burns + Audio (sin subs)
+          # ═══════════════════════════════════════════════════
+          if [ "$RENDER_OK" = "false" ] && [ "${{ env.HAS_KB }}" = "true" ] && [ -s "ken_burns.mp4" ]; then
+            echo ""
+            echo "🎥 INTENTO 4: Solo KB + Audio"
+
+            ffmpeg -y \
+              -i ken_burns.mp4 \
+              -i audio.wav \
+              -c:v libx264 -preset medium -crf 23 -pix_fmt yuv420p \
+              -c:a aac -b:a 192k -ar 44100 \
+              -movflags +faststart \
+              -t "$DURATION" \
+              output.mp4 2>/dev/null
+
+            if [ $? -eq 0 ] && [ -s "output.mp4" ]; then
+              RENDER_OK="true"
+              echo "   ✅ KB basico exitoso"
+            fi
+          fi
+
+          # ═══════════════════════════════════════════════════
+          # INTENTO 5: Fondo + Audio (sin imagen)
+          # ═══════════════════════════════════════════════════
           if [ "$RENDER_OK" = "false" ]; then
             echo ""
-            echo "🎥 INTENTO 4: Fondo + audio basico"
+            echo "🎥 INTENTO 5: Fondo + Audio basico"
 
             ffmpeg -y \
               -stream_loop -1 -i background_original.mp4 \
               -i audio.wav \
               -filter_complex \
-              "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[final]" \
-              -map "[final]" \
-              -map 1:a \
+              "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[final]" \
+              -map "[final]" -map 1:a \
               -c:v libx264 -preset ultrafast -crf 25 -pix_fmt yuv420p \
               -c:a aac -b:a 192k \
               -t "$DURATION" \
@@ -381,17 +416,16 @@ jobs:
 
             if [ $? -eq 0 ] && [ -s "output.mp4" ]; then
               RENDER_OK="true"
-              echo "   ✅ Render basico exitoso"
+              echo "   ✅ Basico exitoso"
             fi
           fi
 
-          # ═══════════════════════════════════════════════
-          # INTENTO 5: Emergencia total
-          # ═══════════════════════════════════════════════
+          # ═══════════════════════════════════════════════════
+          # INTENTO 6: Emergencia total
+          # ═══════════════════════════════════════════════════
           if [ "$RENDER_OK" = "false" ]; then
             echo ""
-            echo "🎥 INTENTO 5: Emergencia (negro + audio)"
-
+            echo "🎥 INTENTO 6: Emergencia"
             ffmpeg -y \
               -f lavfi -i "color=c=black:s=1080x1920:d=${DURATION}:r=30" \
               -i audio.wav \
@@ -405,8 +439,7 @@ jobs:
           if [ -s "output.mp4" ]; then
             SIZE=$(du -h output.mp4 | cut -f1)
             echo "═══════════════════════════════════"
-            echo "✅ VIDEO RENDERIZADO"
-            echo "   Tamaño: $SIZE"
+            echo "✅ VIDEO RENDERIZADO: $SIZE"
             echo "═══════════════════════════════════"
           else
             echo "❌ No se genero video"
@@ -418,18 +451,11 @@ jobs:
         run: |
           echo "📤 Subiendo video..."
           VIDEO_URL=""
-
           for i in 1 2 3; do
             echo "   Intento $i/3..."
-            URL=$(curl -f \
-              -A "Mozilla/5.0" \
-              --connect-timeout 30 \
-              --max-time 300 \
-              -F "reqtype=fileupload" \
-              -F "time=24h" \
-              -F "fileToUpload=@output.mp4" \
+            URL=$(curl -f -A "Mozilla/5.0" --connect-timeout 30 --max-time 300 \
+              -F "reqtype=fileupload" -F "time=24h" -F "fileToUpload=@output.mp4" \
               "https://litterbox.catbox.moe/resources/internals/api.php" 2>/dev/null || echo "")
-
             if echo "$URL" | grep -q "^https://"; then
               VIDEO_URL="$URL"
               echo "   ✅ $VIDEO_URL"
@@ -437,7 +463,6 @@ jobs:
             fi
             sleep 10
           done
-
           if [ -n "$VIDEO_URL" ]; then
             echo "video_url=$VIDEO_URL" >> $GITHUB_OUTPUT
           else
@@ -457,7 +482,7 @@ jobs:
         run: |
           WEBHOOK_URL="${{ secrets.WEBHOOK_URL }}"
           if [ -z "$WEBHOOK_URL" ]; then
-            echo "⚠️ No hay webhook configurado"
+            echo "⚠️ No hay webhook"
             exit 0
           fi
           VIDEO_RESULT="${{ steps.upload.outputs.video_url }}"
