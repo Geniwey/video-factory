@@ -21,133 +21,100 @@ jobs:
           wget -q -O ~/.fonts/Montserrat-Black.ttf \
             "https://github.com/google/fonts/raw/main/ofl/montserrat/static/Montserrat-Black.ttf" || true
           fc-cache -f
-          echo "OK"
 
-      - name: Download assets
+      - name: Download and prepare assets
         run: |
           set +e
 
-          download() {
-            local url=$(echo "$1" | tr -d '\r\n" ' | sed 's/^null$//i' | sed 's/^undefined$//i')
-            [ -z "$url" ] && echo "Sin URL para $2" && return 1
-            echo "Descargando $2..."
-            curl -L -f -A "Mozilla/5.0" --connect-timeout 20 --max-time 120 -o "$2" "$url" 2>/dev/null || return 1
-            [ -s "$2" ] || return 1
-            mime=$(file -b --mime-type "$2" 2>/dev/null)
-            echo "  $mime $(wc -c < "$2") bytes"
-            echo "$mime" | grep -q "text/html" && rm -f "$2" && return 1
-            return 0
-          }
-
-          download "${{ github.event.client_payload.image_url }}" "ia_img.jpg" \
-            && echo "HAS_IMAGE=true" >> $GITHUB_ENV \
-            || echo "HAS_IMAGE=false" >> $GITHUB_ENV
-
-          download "${{ github.event.client_payload.video_url }}" "pexels.mp4" \
-            && echo "HAS_BG=true" >> $GITHUB_ENV \
-            || echo "HAS_BG=false" >> $GITHUB_ENV
-
-          download "${{ github.event.client_payload.audio_url }}" "audio_ext" \
-            && echo "HAS_AUDIO=true" >> $GITHUB_ENV \
-            || echo "HAS_AUDIO=false" >> $GITHUB_ENV
-
-          exit 0
-
-      - name: Audio
-        run: |
-          set +e
-
-          if [ "${{ env.HAS_AUDIO }}" = "true" ] && [ -s "audio_ext" ]; then
-            ffmpeg -y -i audio_ext -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null
+          # Descargar video de fondo
+          VIDEO_URL=$(echo "${{ github.event.client_payload.video_url }}" | tr -d '\r\n" ' | sed 's/^null$//i' | sed 's/^undefined$//i')
+          if [ -n "$VIDEO_URL" ]; then
+            echo "📥 Descargando video Pexels..."
+            curl -L -f -A "Mozilla/5.0" --connect-timeout 20 --max-time 120 -o pexels.mp4 "$VIDEO_URL" 2>/dev/null
           fi
 
-          if [ ! -s "audio.wav" ]; then
-            TEXTO="${{ github.event.client_payload.script_text }}"
-            if [ -z "$TEXTO" ]; then
-              TEXTO="Contenido de tecnologia importante"
+          # Verificar que el video es real
+          if [ -s "pexels.mp4" ]; then
+            mime=$(file -b --mime-type pexels.mp4 2>/dev/null)
+            if echo "$mime" | grep -q "video"; then
+              echo "✅ Video Pexels OK ($(wc -c < pexels.mp4) bytes)"
+            else
+              echo "⚠️ No es video real, descartando"
+              rm -f pexels.mp4
             fi
-            echo "$TEXTO" | head -c 5000 > /tmp/script.txt
-            edge-tts \
-              --voice "es-ES-AlvaroNeural" \
-              --rate="+5%" \
-              --pitch="-3Hz" \
-              --file /tmp/script.txt \
-              --write-media temp.mp3 2>/dev/null || true
-            [ -s "temp.mp3" ] && ffmpeg -y -i temp.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null
           fi
 
+          # Si no hay video, generar fondo oscuro animado
+          if [ ! -s "pexels.mp4" ]; then
+            echo "🎨 Generando fondo oscuro..."
+            ffmpeg -y -f lavfi \
+              -i "color=c=0x0a0e27:s=1080x1920:d=60:r=30" \
+              -vf "vignette=PI/2.5,noise=alls=4:allf=t,eq=brightness=-0.05:contrast=1.2" \
+              -c:v libx264 -preset ultrafast -crf 28 -pix_fmt yuv420p \
+              -t 60 pexels.mp4 2>/dev/null || true
+          fi
+
+          # Generar audio con Edge-TTS
+          TEXTO="${{ github.event.client_payload.script_text }}"
+          if [ -z "$TEXTO" ]; then
+            TEXTO="Lo que acaba de pasar en tecnologia va a cambiar todo y nadie te lo esta contando"
+          fi
+          echo "$TEXTO" | head -c 5000 > script.txt
+
+          echo "🎙️ Generando voz..."
+          edge-tts \
+            --voice "es-ES-AlvaroNeural" \
+            --rate="+5%" \
+            --pitch="-3Hz" \
+            --file script.txt \
+            --write-media audio.mp3 2>/dev/null || true
+
+          if [ -s "audio.mp3" ]; then
+            ffmpeg -y -i audio.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null
+            echo "✅ Audio generado"
+          fi
+
+          # Emergencia si no hay audio
           if [ ! -s "audio.wav" ]; then
+            echo "⚠️ Audio de emergencia"
             ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=mono -t 5 -c:a pcm_s16le audio.wav 2>/dev/null
           fi
 
+          # Guardar duracion
           DURATION=$(ffprobe -v quiet -show_entries format=duration \
             -of default=noprint_wrappers=1:nokey=1 audio.wav 2>/dev/null || echo "5")
           [ -z "$DURATION" ] || [ "$DURATION" = "N/A" ] && DURATION="5"
-          echo "$DURATION" > /tmp/dur.txt
-          echo "Audio: ${DURATION}s"
-          exit 0
+          echo "$DURATION" > dur.txt
+          echo "⏱️ Duración: ${DURATION}s"
 
-      - name: Prepare background
+      - name: Generate subtitles
         run: |
           set +e
-          DURATION=$(cat /tmp/dur.txt)
+          echo "📝 Transcribiendo..."
 
-          if [ "${{ env.HAS_BG }}" = "true" ] && [ -s "pexels.mp4" ]; then
-            ffmpeg -y -stream_loop -1 -i pexels.mp4 \
-              -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1" \
-              -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p \
-              -t "$DURATION" bg.mp4 2>/dev/null
-            [ -s "bg.mp4" ] && echo "Fondo Pexels OK" && echo "HAS_BG_READY=true" >> $GITHUB_ENV && exit 0
-          fi
-
-          echo "Generando fondo oscuro..."
-          ffmpeg -y -f lavfi \
-            -i "color=c=0x0a0e27:s=1080x1920:d=${DURATION}:r=30" \
-            -vf "vignette=PI/2.5,noise=alls=3:allf=t" \
-            -c:v libx264 -preset ultrafast -crf 28 -pix_fmt yuv420p \
-            -t "$DURATION" bg.mp4 2>/dev/null || true
-          echo "HAS_BG_READY=true" >> $GITHUB_ENV
-          exit 0
-
-      - name: Prepare image overlay
-        run: |
-          set +e
-
-          if [ "${{ env.HAS_IMAGE }}" = "true" ] && [ -s "ia_img.jpg" ]; then
-            echo "Preparando imagen IA como overlay..."
-
-            ffmpeg -y -i ia_img.jpg \
-              -vf "scale=700:-1:force_original_aspect_ratio=decrease,pad=720:720:(ow-iw)/2:(oh-ih)/2:black@0,format=rgba" \
-              ia_overlay.png 2>/dev/null
-
-            if [ -s "ia_overlay.png" ]; then
-              echo "Imagen overlay lista"
-              echo "HAS_OVERLAY=true" >> $GITHUB_ENV
-            else
-              echo "HAS_OVERLAY=false" >> $GITHUB_ENV
-            fi
-          else
-            echo "HAS_OVERLAY=false" >> $GITHUB_ENV
-          fi
-          exit 0
-
-      - name: Subtitles
-        run: |
-          set +e
-
-          whisper audio.wav --model small --language es \
-            --output_format json --word_timestamps True \
+          whisper audio.wav \
+            --model small \
+            --language es \
+            --output_format json \
+            --word_timestamps True \
             --output_dir . 2>/dev/null || true
 
           cat << 'PYEOF' > gen_subs.py
           import json, os
 
-          def gen():
+          def generate():
               if not os.path.exists("audio.json"):
                   return False
+
               with open("audio.json") as f:
                   data = json.load(f)
-              words = [w for s in data.get("segments",[]) for w in s.get("words",[]) if w.get("word","").strip()]
+
+              words = []
+              for seg in data.get("segments", []):
+                  for w in seg.get("words", []):
+                      if w.get("word", "").strip():
+                          words.append(w)
+
               if len(words) < 2:
                   return False
 
@@ -157,7 +124,7 @@ jobs:
               header += "PlayResY: 1920\n\n"
               header += "[V4+ Styles]\n"
               header += "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-              header += "Style: Default,Montserrat Black,85,&H00FFFFFF,&H0000D7FF,&H00000000,&HBB000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,500,1\n\n"
+              header += "Style: Default,Montserrat Black,90,&H00FFFFFF,&H0000D7FF,&H00000000,&HBB000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,700,1\n\n"
               header += "[Events]\n"
               header += "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
 
@@ -176,29 +143,33 @@ jobs:
                   for j, cw in enumerate(chunk):
                       parts = []
                       for k, w in enumerate(chunk):
-                          c = w["word"].strip().upper().replace("{", "").replace("}", "")
+                          clean = w["word"].strip().upper().replace("{", "").replace("}", "")
                           if k == j:
-                              parts.append("{\\c&H0000D7FF\\fscx115\\fscy115}" + c + "{\\c&H00FFFFFF\\fscx100\\fscy100}")
+                              parts.append("{\\c&H0000D7FF\\fscx115\\fscy115}" + clean + "{\\c&H00FFFFFF\\fscx100\\fscy100}")
                           else:
-                              parts.append(c)
+                              parts.append(clean)
                       lines.append(f"Dialogue: 0,{fmt(cw['start'])},{fmt(cw['end'])},Default,,0,0,0,,{' '.join(parts)}")
 
               with open("subtitles.ass", "w") as f:
                   f.write(header)
-                  for l in lines:
-                      f.write(l + "\n")
+                  for line in lines:
+                      f.write(line + "\n")
+
               print(f"OK {len(lines)} lineas")
               return True
 
           try:
-              if not gen():
-                  raise Exception("no data")
+              if not generate():
+                  raise Exception("sin datos")
           except Exception as e:
               print(f"Fallback: {e}")
-              fb = "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n\n"
+              fb = "[Script Info]\n"
+              fb += "ScriptType: v4.00+\n"
+              fb += "PlayResX: 1080\n"
+              fb += "PlayResY: 1920\n\n"
               fb += "[V4+ Styles]\n"
               fb += "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-              fb += "Style: Default,Montserrat,80,&H00FFFFFF,&H0000D7FF,&H00000000,&HBB000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,500,1\n\n"
+              fb += "Style: Default,Montserrat,80,&H00FFFFFF,&H0000D7FF,&H00000000,&HBB000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,700,1\n\n"
               fb += "[Events]\n"
               fb += "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
               fb += "Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,\n"
@@ -207,76 +178,43 @@ jobs:
           PYEOF
 
           python3 gen_subs.py || true
-          exit 0
 
       - name: Render final video
         run: |
           set +e
-          DUR=$(cat /tmp/dur.txt)
+          DUR=$(cat dur.txt)
           SAFE_DUR=$(printf '%.2f' "$DUR")
 
-          echo "=== RENDER FINAL ==="
-          echo "Duracion: ${SAFE_DUR}s"
-          echo "Imagen: ${{ env.HAS_OVERLAY }}"
-          echo "Fondo: ${{ env.HAS_BG_READY }}"
+          echo "🎬 Renderizando..."
 
-          DONE="false"
+          # INTENTO 1: Fondo Pexels + Subtitulos + Barra de progreso
+          ffmpeg -y \
+            -stream_loop -1 -i pexels.mp4 \
+            -i audio.wav \
+            -filter_complex "\
+              [0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,eq=brightness=-0.08:saturation=1.1[bg]; \
+              [bg]ass=subtitles.ass[subs]; \
+              [subs]drawbox=x=0:y=0:w='min(iw\,iw*t/${SAFE_DUR})':h=10:color=0xFFD700@0.9:t=fill[final]" \
+            -map "[final]" \
+            -map 1:a \
+            -c:v libx264 -preset medium -crf 20 -pix_fmt yuv420p \
+            -c:a aac -b:a 192k -ar 44100 \
+            -movflags +faststart \
+            -t "$DUR" \
+            output.mp4 2>/tmp/r1.log
 
-          # INTENTO 1: Fondo Pexels + Imagen IA encima + Subs + Barra
-          if [ "$DONE" = "false" ] && [ "${{ env.HAS_OVERLAY }}" = "true" ] && [ -s "bg.mp4" ] && [ -s "ia_overlay.png" ]; then
-            echo "Intento 1: Completo"
+          if [ $? -eq 0 ] && [ -s "output.mp4" ]; then
+            echo "✅ Render completo"
+          else
+            echo "⚠️ Fallo render 1, intentando sin subs..."
+            tail -5 /tmp/r1.log 2>/dev/null || true
+
+            # INTENTO 2: Fondo + Audio (sin subtitulos)
             ffmpeg -y \
-              -i bg.mp4 \
-              -i ia_overlay.png \
+              -stream_loop -1 -i pexels.mp4 \
               -i audio.wav \
               -filter_complex "\
-                [0:v]setsar=1[bg]; \
-                [1:v]setsar=1[img]; \
-                [bg][img]overlay=(W-w)/2:280[with_img]; \
-                [with_img]ass=subtitles.ass[with_subs]; \
-                [with_subs]drawbox=x=0:y=0:w='min(iw\,iw*t/${SAFE_DUR})':h=10:color=0xFFD700@0.9:t=fill[final]" \
-              -map "[final]" \
-              -map 2:a \
-              -c:v libx264 -preset medium -crf 20 -pix_fmt yuv420p \
-              -c:a aac -b:a 192k -ar 44100 \
-              -movflags +faststart \
-              -t "$DUR" \
-              output.mp4 2>/tmp/r1.log
-
-            [ $? -eq 0 ] && [ -s "output.mp4" ] && DONE="true" && echo "OK Completo" || { echo "Fallo 1"; tail -5 /tmp/r1.log; }
-          fi
-
-          # INTENTO 2: Fondo Pexels + Imagen IA (sin subs)
-          if [ "$DONE" = "false" ] && [ "${{ env.HAS_OVERLAY }}" = "true" ] && [ -s "bg.mp4" ] && [ -s "ia_overlay.png" ]; then
-            echo "Intento 2: Sin subs"
-            ffmpeg -y \
-              -i bg.mp4 \
-              -i ia_overlay.png \
-              -i audio.wav \
-              -filter_complex "\
-                [0:v]setsar=1[bg]; \
-                [1:v]setsar=1[img]; \
-                [bg][img]overlay=(W-w)/2:280[final]" \
-              -map "[final]" \
-              -map 2:a \
-              -c:v libx264 -preset medium -crf 20 -pix_fmt yuv420p \
-              -c:a aac -b:a 192k \
-              -movflags +faststart \
-              -t "$DUR" \
-              output.mp4 2>/dev/null
-
-            [ $? -eq 0 ] && [ -s "output.mp4" ] && DONE="true" && echo "OK Sin subs"
-          fi
-
-          # INTENTO 3: Solo fondo + audio + subs
-          if [ "$DONE" = "false" ] && [ -s "bg.mp4" ]; then
-            echo "Intento 3: Solo fondo"
-            ffmpeg -y \
-              -i bg.mp4 \
-              -i audio.wav \
-              -filter_complex "\
-                [0:v]ass=subtitles.ass[with_subs]; \
-                [with_subs]drawbox=x=0:y=0:w='min(iw\,iw*t/${SAFE_DUR})':h=10:color=0xFFD700@0.9:t=fill[final]" \
+                [0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[final]" \
               -map "[final]" \
               -map 1:a \
               -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p \
@@ -284,53 +222,45 @@ jobs:
               -t "$DUR" \
               output.mp4 2>/dev/null
 
-            [ $? -eq 0 ] && [ -s "output.mp4" ] && DONE="true" && echo "OK Solo fondo"
+            if [ $? -eq 0 ] && [ -s "output.mp4" ]; then
+              echo "✅ Render sin subs"
+            else
+              # INTENTO 3: Emergencia total
+              echo "⚠️ Emergencia..."
+              ffmpeg -y \
+                -f lavfi -i "color=c=0x0a0e27:s=1080x1920:d=${DUR}:r=30" \
+                -i audio.wav \
+                -c:v libx264 -preset ultrafast -crf 28 -pix_fmt yuv420p \
+                -c:a aac -b:a 128k \
+                -t "$DUR" -shortest \
+                output.mp4 2>/dev/null || true
+            fi
           fi
 
-          # INTENTO 4: Solo fondo + audio
-          if [ "$DONE" = "false" ] && [ -s "bg.mp4" ]; then
-            echo "Intento 4: Fondo basico"
-            ffmpeg -y \
-              -i bg.mp4 \
-              -i audio.wav \
-              -c:v copy -c:a aac -b:a 192k \
-              -movflags +faststart \
-              -t "$DUR" \
-              output.mp4 2>/dev/null
+          [ -s "output.mp4" ] && echo "📦 Video: $(du -h output.mp4 | cut -f1)" || { echo "❌ FALLO"; exit 1; }
 
-            [ $? -eq 0 ] && [ -s "output.mp4" ] && DONE="true" && echo "OK Basico"
-          fi
-
-          # INTENTO 5: Emergencia
-          if [ "$DONE" = "false" ]; then
-            echo "Intento 5: Emergencia"
-            ffmpeg -y \
-              -f lavfi -i "color=c=0x0a0e27:s=1080x1920:d=${DUR}:r=30" \
-              -i audio.wav \
-              -c:v libx264 -preset ultrafast -crf 28 -pix_fmt yuv420p \
-              -c:a aac -b:a 128k \
-              -t "$DUR" -shortest \
-              output.mp4 2>/dev/null || true
-          fi
-
-          echo ""
-          [ -s "output.mp4" ] && echo "VIDEO LISTO: $(du -h output.mp4 | cut -f1)" || { echo "FALLO TOTAL"; exit 1; }
-
-      - name: Upload
+      - name: Upload video
         id: upload
         run: |
           set +e
+          echo "📤 Subiendo..."
+
           for i in 1 2 3; do
             URL=$(curl -f -A "Mozilla/5.0" --connect-timeout 30 --max-time 300 \
-              -F "reqtype=fileupload" -F "time=24h" -F "fileToUpload=@output.mp4" \
+              -F "reqtype=fileupload" \
+              -F "time=24h" \
+              -F "fileToUpload=@output.mp4" \
               "https://litterbox.catbox.moe/resources/internals/api.php" 2>/dev/null || echo "")
+
             if echo "$URL" | grep -q "^https://"; then
+              echo "✅ $URL"
               echo "video_url=$URL" >> $GITHUB_OUTPUT
-              echo "OK: $URL"
               exit 0
             fi
-            sleep 5
+            echo "   Reintentando en 10s..."
+            sleep 10
           done
+
           echo "video_url=UPLOAD_FAILED" >> $GITHUB_OUTPUT
           exit 0
 
@@ -338,7 +268,7 @@ jobs:
         if: steps.upload.outputs.video_url == 'UPLOAD_FAILED'
         uses: actions/upload-artifact@v4
         with:
-          name: video
+          name: video-final
           path: output.mp4
           retention-days: 1
 
