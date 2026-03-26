@@ -29,6 +29,8 @@ jobs:
           wget -q -O ~/.fonts/Montserrat-Black.ttf \
             "https://github.com/google/fonts/raw/main/ofl/montserrat/static/Montserrat-Black.ttf" || true
           fc-cache -f
+          echo "📋 Version FFmpeg:"
+          ffmpeg -version | head -1
 
       - name: Download Assets
         run: |
@@ -67,7 +69,7 @@ jobs:
           AUDIO_OK="false"
 
           if [ -s "audio_original" ]; then
-            echo "🎵 Procesando audio descargado..."
+            echo "🎵 Procesando audio..."
             if ffmpeg -y -i audio_original -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null; then
               AUDIO_OK="true"
               echo "✅ Audio convertido"
@@ -75,7 +77,7 @@ jobs:
           fi
 
           if [ "$AUDIO_OK" = "false" ]; then
-            echo "🎙️ Generando audio con Edge-TTS..."
+            echo "🎙️ Generando con Edge-TTS..."
             SAFE_TEXT=$(echo "${SCRIPT_TEXT:-Contenido de tecnologia}" | head -c 5000)
             echo "$SAFE_TEXT" > /tmp/script.txt
             edge-tts \
@@ -86,38 +88,32 @@ jobs:
               --write-media temp_tts.mp3 2>/dev/null || true
             if [ -s "temp_tts.mp3" ]; then
               ffmpeg -y -i temp_tts.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null || true
-              echo "✅ Audio TTS generado"
+              echo "✅ TTS generado"
             fi
           fi
 
           if [ ! -s "audio.wav" ]; then
-            echo "⚠️ Audio de emergencia"
             ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=mono -t 5 -c:a pcm_s16le audio.wav 2>/dev/null || true
           fi
 
           DURATION=$(ffprobe -v quiet -show_entries format=duration \
             -of default=noprint_wrappers=1:nokey=1 audio.wav 2>/dev/null || echo "5")
-          if [ -z "$DURATION" ] || [ "$DURATION" = "N/A" ]; then
-            DURATION="5"
-          fi
+          if [ -z "$DURATION" ] || [ "$DURATION" = "N/A" ]; then DURATION="5"; fi
           echo "$DURATION" > /tmp/audio_duration.txt
           echo "⏱️ Duracion: ${DURATION}s"
 
-      - name: Prepare Image for Ken Burns
+      - name: Prepare Image
         run: |
-          echo "🖼️ Preparando imagen..."
-
           if [ -s "overlay_original" ]; then
+            echo "🖼️ Preparando imagen para Ken Burns..."
             ffmpeg -y -i overlay_original \
               -vf "scale=4320:7680:force_original_aspect_ratio=decrease,pad=4320:7680:(ow-iw)/2:(oh-ih)/2:black" \
               -pix_fmt yuvj420p \
               overlay_large.jpg 2>/dev/null
-
             if [ -s "overlay_large.jpg" ]; then
               echo "✅ Imagen lista ($(du -h overlay_large.jpg | cut -f1))"
               echo "HAS_IMAGE=true" >> $GITHUB_ENV
             else
-              echo "⚠️ Conversion fallo"
               echo "HAS_IMAGE=false" >> $GITHUB_ENV
             fi
           else
@@ -128,16 +124,10 @@ jobs:
       - name: Prepare Background
         run: |
           DURATION=$(cat /tmp/audio_duration.txt)
-          HAS_BG="false"
 
-          if [ -s "background_original.mp4" ]; then
-            if ffprobe -v quiet background_original.mp4 2>/dev/null; then
-              HAS_BG="true"
-              echo "✅ Video de fondo OK"
-            fi
-          fi
-
-          if [ "$HAS_BG" = "false" ]; then
+          if [ -s "background_original.mp4" ] && ffprobe -v quiet background_original.mp4 2>/dev/null; then
+            echo "✅ Video de fondo OK"
+          else
             echo "🎨 Generando fondo oscuro..."
             ffmpeg -y -f lavfi \
               -i "color=c=0x0a0e27:s=1080x1920:d=${DURATION}:r=30" \
@@ -147,15 +137,13 @@ jobs:
             echo "✅ Fondo generado"
           fi
 
-          echo "HAS_BG=$HAS_BG" >> $GITHUB_ENV
-
       - name: Create Ken Burns Video
         run: |
           DURATION=$(cat /tmp/audio_duration.txt)
           FRAMES=$(echo "$DURATION * 30" | bc | awk '{print int($1+0.5)}')
           if [ "$FRAMES" -lt 30 ]; then FRAMES=150; fi
 
-          echo "🎥 Generando Ken Burns (${FRAMES} frames)..."
+          echo "🎥 Ken Burns: ${FRAMES} frames, ${DURATION}s"
 
           if [ "${{ env.HAS_IMAGE }}" = "true" ] && [ -s "overlay_large.jpg" ]; then
             ffmpeg -y \
@@ -168,7 +156,7 @@ jobs:
               ken_burns.mp4 2>/tmp/kb.log
 
             if [ $? -eq 0 ] && [ -s "ken_burns.mp4" ]; then
-              echo "✅ Ken Burns generado ($(du -h ken_burns.mp4 | cut -f1))"
+              echo "✅ Ken Burns OK ($(du -h ken_burns.mp4 | cut -f1))"
               echo "HAS_KB=true" >> $GITHUB_ENV
             else
               echo "⚠️ Ken Burns fallo"
@@ -176,8 +164,32 @@ jobs:
               echo "HAS_KB=false" >> $GITHUB_ENV
             fi
           else
-            echo "⚠️ Sin imagen, saltando Ken Burns"
             echo "HAS_KB=false" >> $GITHUB_ENV
+          fi
+
+      - name: Create Transparent Background
+        run: |
+          DURATION=$(cat /tmp/audio_duration.txt)
+
+          echo "🎬 Creando fondo semi-transparente..."
+
+          ffmpeg -y \
+            -stream_loop -1 -i background_original.mp4 \
+            -filter_complex "\
+              [0:v]scale=1080:1920:force_original_aspect_ratio=increase,\
+              crop=1080:1920,setsar=1,\
+              eq=brightness=-0.3:saturation=0.5,\
+              format=yuv420p[final]" \
+            -map "[final]" \
+            -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p \
+            -t "$DURATION" \
+            bg_dark.mp4 2>/dev/null
+
+          if [ -s "bg_dark.mp4" ]; then
+            echo "✅ Fondo oscurecido listo"
+            echo "HAS_DARKBG=true" >> $GITHUB_ENV
+          else
+            echo "HAS_DARKBG=false" >> $GITHUB_ENV
           fi
 
       - name: Transcribe and Subtitles
@@ -242,7 +254,7 @@ jobs:
                   f.write(header)
                   for line in lines:
                       f.write(line + "\n")
-              print(f"✅ {len(lines)} lineas de subtitulos")
+              print(f"✅ {len(lines)} lineas")
               return True
 
           try:
@@ -269,32 +281,36 @@ jobs:
           SAFE_DUR=$(printf '%.2f' "$DURATION")
 
           echo "🎬 ═══════════════════════════════════"
-          echo "🎬 RENDER FINAL — COMPOSICION POR CAPAS"
+          echo "🎬 RENDER FINAL"
           echo "   Duracion: ${SAFE_DUR}s"
           echo "   Ken Burns: ${{ env.HAS_KB }}"
+          echo "   Fondo oscuro: ${{ env.HAS_DARKBG }}"
           echo "🎬 ═══════════════════════════════════"
 
           RENDER_OK="false"
 
-          # ═══════════════════════════════════════════════════
+          # ═══════════════════════════════════════════════════════
           # INTENTO 1: Ken Burns + Fondo Pexels + Subs + Barra
-          # Estrategia: Ken Burns ya es un VIDEO (ken_burns.mp4)
-          # Lo mezclamos con el fondo como dos videos normales
-          # SIN problemas de alfa
-          # ═══════════════════════════════════════════════════
-          if [ "${{ env.HAS_KB }}" = "true" ] && [ -s "ken_burns.mp4" ]; then
+          #
+          # ESTRATEGIA SIN ALFA:
+          # 1. Ken Burns ya es un video limpio (ken_burns.mp4)
+          # 2. Fondo ya esta oscurecido (bg_dark.mp4)
+          # 3. Usamos blend=shortest=1:all_mode=overlay:all_opacity=0.15
+          #    en vez de colorchannelmixer=aa (que no funciona)
+          # ═══════════════════════════════════════════════════════
+          if [ "${{ env.HAS_KB }}" = "true" ] && [ "${{ env.HAS_DARKBG }}" = "true" ]; then
             echo ""
-            echo "🎥 INTENTO 1: Completo (KB + Fondo + Subs + Barra)"
+            echo "🎥 INTENTO 1: KB + Fondo blend + Subs + Barra"
 
             ffmpeg -y \
               -i ken_burns.mp4 \
-              -stream_loop -1 -i background_original.mp4 \
+              -i bg_dark.mp4 \
               -i audio.wav \
               -filter_complex "\
-                [1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=yuva420p,colorchannelmixer=aa=0.12[bg]; \
                 [0:v]setsar=1[main]; \
-                [main][bg]overlay=0:0:format=yuv420[merged]; \
-                [merged]ass=subtitles.ass[withsubs]; \
+                [1:v]setsar=1[bg]; \
+                [main][bg]blend=all_mode=overlay:all_opacity=0.15[mixed]; \
+                [mixed]ass=subtitles.ass[withsubs]; \
                 [withsubs]drawbox=x=0:y=0:w='min(iw\,iw*t/${SAFE_DUR})':h=8:color=0xFFD700@0.9:t=fill[final]" \
               -map "[final]" \
               -map 2:a \
@@ -308,26 +324,26 @@ jobs:
               RENDER_OK="true"
               echo "   ✅ RENDER COMPLETO EXITOSO"
             else
-              echo "   ⚠️ Fallo"
-              tail -5 /tmp/r1.log 2>/dev/null || true
+              echo "   ⚠️ Fallo intento 1"
+              tail -8 /tmp/r1.log 2>/dev/null || true
             fi
           fi
 
-          # ═══════════════════════════════════════════════════
-          # INTENTO 2: Ken Burns + Fondo (sin subtitulos)
-          # ═══════════════════════════════════════════════════
-          if [ "$RENDER_OK" = "false" ] && [ "${{ env.HAS_KB }}" = "true" ] && [ -s "ken_burns.mp4" ]; then
+          # ═══════════════════════════════════════════════════════
+          # INTENTO 2: Ken Burns + Fondo blend (sin subs)
+          # ═══════════════════════════════════════════════════════
+          if [ "$RENDER_OK" = "false" ] && [ "${{ env.HAS_KB }}" = "true" ] && [ "${{ env.HAS_DARKBG }}" = "true" ]; then
             echo ""
-            echo "🎥 INTENTO 2: KB + Fondo (sin subs)"
+            echo "🎥 INTENTO 2: KB + Fondo blend (sin subs)"
 
             ffmpeg -y \
               -i ken_burns.mp4 \
-              -stream_loop -1 -i background_original.mp4 \
+              -i bg_dark.mp4 \
               -i audio.wav \
               -filter_complex "\
-                [1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=yuva420p,colorchannelmixer=aa=0.12[bg]; \
                 [0:v]setsar=1[main]; \
-                [main][bg]overlay=0:0:format=yuv420[final]" \
+                [1:v]setsar=1[bg]; \
+                [main][bg]blend=all_mode=overlay:all_opacity=0.15[final]" \
               -map "[final]" \
               -map 2:a \
               -c:v libx264 -preset medium -crf 23 -pix_fmt yuv420p \
@@ -340,23 +356,24 @@ jobs:
               RENDER_OK="true"
               echo "   ✅ KB + Fondo exitoso"
             else
-              echo "   ⚠️ Fallo"
-              tail -5 /tmp/r2.log 2>/dev/null || true
+              echo "   ⚠️ Fallo intento 2"
+              tail -8 /tmp/r2.log 2>/dev/null || true
             fi
           fi
 
-          # ═══════════════════════════════════════════════════
-          # INTENTO 3: Solo Ken Burns + Audio + Subs
-          # ═══════════════════════════════════════════════════
-          if [ "$RENDER_OK" = "false" ] && [ "${{ env.HAS_KB }}" = "true" ] && [ -s "ken_burns.mp4" ]; then
+          # ═══════════════════════════════════════════════════════
+          # INTENTO 3: Solo Ken Burns + Subs + Barra
+          # ═══════════════════════════════════════════════════════
+          if [ "$RENDER_OK" = "false" ] && [ "${{ env.HAS_KB }}" = "true" ]; then
             echo ""
-            echo "🎥 INTENTO 3: Solo KB + Audio + Subs"
+            echo "🎥 INTENTO 3: KB + Audio + Subs"
 
             ffmpeg -y \
               -i ken_burns.mp4 \
               -i audio.wav \
               -filter_complex "\
-                [0:v]ass=subtitles.ass[final]" \
+                [0:v]ass=subtitles.ass[withsubs]; \
+                [withsubs]drawbox=x=0:y=0:w='min(iw\,iw*t/${SAFE_DUR})':h=8:color=0xFFD700@0.9:t=fill[final]" \
               -map "[final]" \
               -map 1:a \
               -c:v libx264 -preset medium -crf 23 -pix_fmt yuv420p \
@@ -367,24 +384,24 @@ jobs:
 
             if [ $? -eq 0 ] && [ -s "output.mp4" ]; then
               RENDER_OK="true"
-              echo "   ✅ KB + Audio exitoso"
+              echo "   ✅ KB + Subs exitoso"
             else
-              echo "   ⚠️ Fallo"
+              echo "   ⚠️ Fallo intento 3"
               tail -5 /tmp/r3.log 2>/dev/null || true
             fi
           fi
 
-          # ═══════════════════════════════════════════════════
-          # INTENTO 4: Solo Ken Burns + Audio (sin subs)
-          # ═══════════════════════════════════════════════════
-          if [ "$RENDER_OK" = "false" ] && [ "${{ env.HAS_KB }}" = "true" ] && [ -s "ken_burns.mp4" ]; then
+          # ═══════════════════════════════════════════════════════
+          # INTENTO 4: Solo Ken Burns + Audio (sin nada mas)
+          # ═══════════════════════════════════════════════════════
+          if [ "$RENDER_OK" = "false" ] && [ "${{ env.HAS_KB }}" = "true" ]; then
             echo ""
             echo "🎥 INTENTO 4: Solo KB + Audio"
 
             ffmpeg -y \
               -i ken_burns.mp4 \
               -i audio.wav \
-              -c:v libx264 -preset medium -crf 23 -pix_fmt yuv420p \
+              -c:v copy \
               -c:a aac -b:a 192k -ar 44100 \
               -movflags +faststart \
               -t "$DURATION" \
@@ -396,12 +413,12 @@ jobs:
             fi
           fi
 
-          # ═══════════════════════════════════════════════════
-          # INTENTO 5: Fondo + Audio (sin imagen)
-          # ═══════════════════════════════════════════════════
+          # ═══════════════════════════════════════════════════════
+          # INTENTO 5: Fondo + Audio
+          # ═══════════════════════════════════════════════════════
           if [ "$RENDER_OK" = "false" ]; then
             echo ""
-            echo "🎥 INTENTO 5: Fondo + Audio basico"
+            echo "🎥 INTENTO 5: Fondo + Audio"
 
             ffmpeg -y \
               -stream_loop -1 -i background_original.mp4 \
@@ -420,9 +437,9 @@ jobs:
             fi
           fi
 
-          # ═══════════════════════════════════════════════════
-          # INTENTO 6: Emergencia total
-          # ═══════════════════════════════════════════════════
+          # ═══════════════════════════════════════════════════════
+          # INTENTO 6: Emergencia
+          # ═══════════════════════════════════════════════════════
           if [ "$RENDER_OK" = "false" ]; then
             echo ""
             echo "🎥 INTENTO 6: Emergencia"
@@ -449,7 +466,7 @@ jobs:
       - name: Upload Video
         id: upload
         run: |
-          echo "📤 Subiendo video..."
+          echo "📤 Subiendo..."
           VIDEO_URL=""
           for i in 1 2 3; do
             echo "   Intento $i/3..."
