@@ -37,19 +37,26 @@ jobs:
             local output="$2"
             local url=$(echo "$raw_url" | tr -d '\r\n" ' | sed 's/^undefined$//i' | sed 's/^null$//i')
             
-            # 🔥 EL ARREGLO: Si está vacío, simplemente salimos en paz (return 0), no destruimos la máquina.
             if [ -z "$url" ]; then 
-              echo "⚠️ URL vacía para $output. Se generará un fondo automático."
+              echo "⚠️ URL vacía para $output."
               return 0 
             fi
 
-            # 🔐 EL TRUCO: Si es nuestro Gist secreto, lo convertimos a audio
+            # 🔐 EL TRUCO MEJORADO: Esperar a que el Gist esté listo y usar -i (ignore-garbage)
             if [[ "$url" == *"gist.githubusercontent.com"* ]]; then
-              echo "🔐 Detectado archivo seguro. Descodificando..."
-              curl -L -s "$url" > temp.b64 || true
-              base64 -d temp.b64 > "$output" 2>/dev/null || true
-              rm -f temp.b64
-              echo "✅ $output extraído con éxito."
+              echo "🔐 Detectado Gist secreto. Extrayendo audio..."
+              for i in 1 2 3; do
+                HTTP_CODE=$(curl -L -s -w "%{http_code}" -o temp.b64 "$url")
+                if [ "$HTTP_CODE" = "200" ] && [ -s temp.b64 ]; then
+                  echo "✅ Gist descargado. Descodificando..."
+                  cat temp.b64 | tr -d '\n\r ' | base64 -di > "$output" 2>/dev/null || true
+                  rm -f temp.b64
+                  return 0
+                fi
+                echo "⏳ Gist no disponible aún (HTTP $HTTP_CODE). Reintentando en 3s..."
+                sleep 3
+              done
+              echo "❌ Falló la descarga del Gist."
               return 0
             fi
 
@@ -68,16 +75,20 @@ jobs:
             return 0
           }
 
-          download_asset "${{ github.event.client_payload.audio_url }}" "audio_original" || true
-          download_asset "${{ github.event.client_payload.video_url }}" "background_original.mp4" || true
-          download_asset "${{ github.event.client_payload.image_url }}" "overlay_original" || true
+          download_asset "${{ github.event.client_payload.audio_url }}" "audio_original"
+          download_asset "${{ github.event.client_payload.video_url }}" "background_original.mp4"
+          download_asset "${{ github.event.client_payload.image_url }}" "overlay_original"
 
       - name: Audio Processing
         run: |
           AUDIO_OK=false
-          if [ -f "audio_original" ]; then
+          if [ -s "audio_original" ]; then
+            echo "🔄 Convirtiendo audio Gist a WAV..."
             if ffmpeg -y -i audio_original -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null; then
               AUDIO_OK=true
+              echo "✅ Audio original convertido con éxito."
+            else
+              echo "⚠️ Falló la conversión del audio original."
             fi
           fi
           
@@ -98,6 +109,7 @@ jobs:
           DURATION=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 audio.wav || echo "5")
           if ! awk "BEGIN {exit !($DURATION > 0)}"; then DURATION=5; fi
           echo "$DURATION" > /tmp/audio_duration.txt
+          echo "⏱️ Duración del audio: $DURATION"
 
       - name: Visuals Processing
         run: |
