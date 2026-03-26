@@ -39,10 +39,8 @@ jobs:
           pip install openai-whisper edge-tts
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg bc
-          
           mkdir -p ~/.fonts
-          wget -q -O ~/.fonts/Montserrat-Black.ttf \
-            "https://github.com/JulietaUla/Montserrat/raw/master/fonts/ttf/Montserrat-Black.ttf"
+          wget -q -O ~/.fonts/Montserrat-Black.ttf "https://github.com/JulietaUla/Montserrat/raw/master/fonts/ttf/Montserrat-Black.ttf"
           fc-cache -f
           echo "✅ Dependencias instaladas"
 
@@ -53,8 +51,7 @@ jobs:
             local url="$1" output="$2" attempt=1
             while [ $attempt -le 3 ]; do
               echo "📥 $output (intento $attempt/3)..."
-              if curl -L -f --connect-timeout 30 --max-time 120 \
-                --retry 2 --retry-delay 5 -o "$output" "$url"; then
+              if curl -L -f --connect-timeout 30 --max-time 120 --retry 2 --retry-delay 5 -o "$output" "$url"; then
                 local size=$(stat --printf="%s" "$output" 2>/dev/null || echo "0")
                 if [ "$size" -gt 1000 ]; then
                   echo "✅ $output ($(du -h "$output" | cut -f1))"
@@ -68,35 +65,24 @@ jobs:
             echo "❌ Falló: $output"
             return 1
           }
-          
           download "${{ github.event.client_payload.audio_url }}" "audio.wav" || true
           download "${{ github.event.client_payload.video_url }}" "background.mp4"
           download "${{ github.event.client_payload.image_url }}" "overlay.png"
 
-      # ── TTS fallback si el audio no se descargó ──
+      # ── TTS fallback ──
       - name: TTS fallback
-        if: hashFiles('audio.wav') == '' || ! test -s audio.wav
+        if: hashFiles('audio.wav') == ''
         run: |
           echo "⚠️ Audio no disponible. Generando con Edge-TTS..."
           echo '${{ github.event.client_payload.script_text }}' > script.txt
-          edge-tts \
-            --voice "es-ES-AlvaroNeural" \
-            --rate "+5%" \
-            --pitch "-3Hz" \
-            --file script.txt \
-            --write-media audio.wav
+          edge-tts --voice "es-ES-AlvaroNeural" --rate "+5%" --pitch "-3Hz" --file script.txt --write-media audio.wav
           echo "✅ Audio generado con Edge-TTS"
 
       # ── Whisper ──
       - name: Transcribe
         run: |
           echo "🎙 Transcribiendo con Whisper small..."
-          whisper audio.wav \
-            --model small \
-            --language ${{ github.event.client_payload.language || 'es' }} \
-            --output_format json \
-            --word_timestamps True \
-            --output_dir .
+          whisper audio.wav --model small --language ${{ github.event.client_payload.language || 'es' }} --output_format json --word_timestamps True --output_dir .
           echo "✅ Transcripción completada"
 
       # ── Subtítulos ──
@@ -118,7 +104,6 @@ jobs:
               segs = data.get('segments', [])
           except:
               segs = [{"start":0,"end":50,"text":"..."}]
-          
           ass = """[Script Info]
           Title: Fallback
           ScriptType: v4.00+
@@ -154,22 +139,13 @@ jobs:
         run: |
           for i in 1 2 3; do
             echo "📤 Litterbox (intento $i/3)..."
-            URL=$(curl -f --max-time 180 \
-              -F "reqtype=fileupload" \
-              -F "time=24h" \
-              -F "fileToUpload=@output.mp4" \
-              https://litterbox.catbox.moe/resources/internals/api.php 2>/dev/null) \
+            URL=$(curl -f --max-time 180 -F "reqtype=fileupload" -F "time=24h" -F "fileToUpload=@output.mp4" https://litterbox.catbox.moe/resources/internals/api.php 2>/dev/null) \
               && echo "$URL" | grep -q "^https://" \
               && { echo "video_url=$URL" >> $GITHUB_OUTPUT; echo "✅ $URL"; exit 0; }
             sleep 15
           done
-          
           echo "📤 Fallback: Catbox permanente..."
-          URL=$(curl -f --max-time 300 \
-            -F "reqtype=fileupload" \
-            -F "fileToUpload=@output.mp4" \
-            https://catbox.moe/user/api.php 2>/dev/null)
-          
+          URL=$(curl -f --max-time 300 -F "reqtype=fileupload" -F "fileToUpload=@output.mp4" https://catbox.moe/user/api.php 2>/dev/null)
           if echo "$URL" | grep -q "^https://"; then
             echo "video_url=$URL" >> $GITHUB_OUTPUT
             echo "✅ $URL"
@@ -189,9 +165,4 @@ jobs:
             STATUS="failed"
             PAYLOAD="{\"status\":\"$STATUS\",\"error\":\"Render o upload falló\"}"
           fi
-          
-          curl -sf -X POST "${{ secrets.WEBHOOK_URL }}" \
-            -H "Content-Type: application/json" \
-            -d "$PAYLOAD" \
-            && echo "✅ Webhook enviado ($STATUS)" \
-            || echo "⚠️ Webhook falló"
+          curl -sf -X POST "${{ secrets.WEBHOOK_URL }}" -H "Content-Type: application/json" -d "$PAYLOAD" || echo "⚠️ Webhook falló"
