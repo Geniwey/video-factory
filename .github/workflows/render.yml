@@ -1,4 +1,4 @@
-name: Render Short Video Final Ultra
+name: Render Short Video Viral
 
 on:
   repository_dispatch:
@@ -12,21 +12,18 @@ jobs:
 
       - name: Setup
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg bc
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
           pip install --quiet openai-whisper edge-tts
           mkdir -p ~/.fonts && wget -q -O ~/.fonts/Montserrat-Black.ttf "https://github.com/google/fonts/raw/main/ofl/montserrat/static/Montserrat-Black.ttf" || true
           fc-cache -f
 
       - name: Assets
         run: |
-          download() {
-            curl -L -f -o "$2" "$(echo "$1" | tr -d '\r\n" ')" 2>/dev/null || return 0
-          }
-          download "${{ github.event.client_payload.image_url }}" "ia_img.jpg"
-          download "${{ github.event.client_payload.video_url }}" "pexels.mp4"
+          curl -L -f -o ia_img.jpg "$(echo "${{ github.event.client_payload.image_url }}" | tr -d '\r\n" ')"
+          curl -L -f -o pexels.mp4 "$(echo "${{ github.event.client_payload.video_url }}" | tr -d '\r\n" ')"
           echo "${{ github.event.client_payload.script_text }}" > script.txt
-          edge-tts --voice "es-ES-AlvaroNeural" --rate="+5%" --file script.txt --write-media audio.mp3 2>/dev/null
-          ffmpeg -y -i audio.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null
+          edge-tts --voice "es-ES-AlvaroNeural" --rate="+5%" --file script.txt --write-media audio.mp3
+          ffmpeg -y -i audio.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio.wav
           DURATION=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 audio.wav)
           echo "$DURATION" > dur.txt
 
@@ -52,16 +49,16 @@ jobs:
       - name: Render Final
         run: |
           DUR=$(cat dur.txt)
-          # USAMOS UN FILTRO QUE NO TIEMBLA: Escala progresiva manual
-          ffmpeg -y -loop 1 -i ia_img.jpg -stream_loop -1 -i pexels.mp4 -i audio.wav -filter_complex \
-          "[0:v]scale=2160:3840,zoompan=z='1.0+0.0005*on':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920:fps=30[ia]; \
-           [1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,format=yuv420p[px]; \
-           [ia][px]blend=all_expr='A*0.92+B*0.08'[mixed]; \
+          # VÍDEO VIRAL: Fondo de neón moviéndose + Imagen IA encima nítida (sin temblores)
+          ffmpeg -y -stream_loop -1 -i pexels.mp4 -i ia_img.jpg -i audio.wav -filter_complex \
+          "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[bg]; \
+           [1:v]scale=800:800:force_original_aspect_ratio=decrease,pad=800:800:(ow-iw)/2:(oh-ih)/2:black@0,format=rgba[img]; \
+           [bg][img]overlay=(W-w)/2:300[mixed]; \
            [mixed]ass=subtitles.ass[subs]; \
            [subs]drawbox=x=0:y=0:w='iw*t/${DUR}':h=10:color=0xFFD700@0.9:t=fill[final]" \
-          -map "[final]" -map 2:a -c:v libx264 -preset fast -crf 18 -pix_fmt yuv420p -t "$DUR" output.mp4
+          -map "[final]" -map 2:a -c:v libx264 -preset fast -crf 20 -pix_fmt yuv420p -t "$DUR" output.mp4
 
       - name: Upload
         run: |
           URL=$(curl -f -F "reqtype=fileupload" -F "time=24h" -F "fileToUpload=@output.mp4" "https://litterbox.catbox.moe/resources/internals/api.php")
-          echo "VÍDEO LISTO: $URL"
+          echo "VÍDEO VIRAL LISTO: $URL"
