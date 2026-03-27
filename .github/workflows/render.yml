@@ -1,5 +1,8 @@
 name: Render Short Video
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 on:
   repository_dispatch:
     types: [render-video]
@@ -279,10 +282,17 @@ jobs:
           WH="${{ secrets.WEBHOOK_URL }}"
           [ -z "$WH" ] && exit 0
           VR="${{ steps.upload.outputs.video_url }}"
+          TIT="${{ github.event.client_payload.titulo }}"
+          DESC="${{ github.event.client_payload.descripcion }}"
           ST="completed"
           [ "$VR" = "UPLOAD_FAILED" ] && ST="failed"
           [ -z "$VR" ] && ST="failed"
+          
+          # Escapar comillas dobles para JSON
+          TIT=$(echo "$TIT" | sed 's/"/\\"/g')
+          DESC=$(echo "$DESC" | sed 's/"/\\"/g')
+          
           curl -sf -X POST "$WH" \
             -H "Content-Type: application/json" \
-            -d "{\"status\":\"$ST\",\"video_url\":\"$VR\"}" 2>/dev/null || true
+            -d "{\"status\":\"$ST\",\"video_url\":\"$VR\",\"titulo\":\"$TIT\",\"descripcion\":\"$DESC\"}" 2>/dev/null || true
           exit 0
