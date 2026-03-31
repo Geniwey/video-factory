@@ -188,7 +188,7 @@ jobs:
           DUR=$(cat dur.txt)
           SAFE_DUR=$(printf '%.2f' "$DUR")
 
-          echo "🎬 Renderizando..."
+          echo "🎬 Renderizando (${SAFE_DUR}s)..."
 
           # INTENTO 1: Fondo Pexels + Subtitulos + Barra de progreso
           ffmpeg -y \
@@ -275,24 +275,39 @@ jobs:
           path: output.mp4
           retention-days: 1
 
-      - name: Webhook
+      - name: Webhook to Make
         if: always()
         run: |
           set +e
           WH="${{ secrets.WEBHOOK_URL }}"
           [ -z "$WH" ] && exit 0
+
           VR="${{ steps.upload.outputs.video_url }}"
+
+          # Leer titulo y descripcion del payload
           TIT="${{ github.event.client_payload.titulo }}"
           DESC="${{ github.event.client_payload.descripcion }}"
+
+          # Fallbacks si vienen vacios
+          [ -z "$TIT" ] && TIT="Short de Tecnologia"
+          [ -z "$DESC" ] && DESC="#tecnologia #shorts #viral #ia #noticias"
+
+          # Limpiar para JSON valido (quitar comillas dobles y saltos de linea)
+          TIT=$(echo "$TIT" | tr -d '"' | tr '\n' ' ' | head -c 100)
+          DESC=$(echo "$DESC" | tr -d '"' | tr '\n' ' ' | head -c 500)
+
+          # Determinar status
           ST="completed"
           [ "$VR" = "UPLOAD_FAILED" ] && ST="failed"
           [ -z "$VR" ] && ST="failed"
-          
-          # Escapar comillas dobles para JSON
-          TIT=$(echo "$TIT" | sed 's/"/\\"/g')
-          DESC=$(echo "$DESC" | sed 's/"/\\"/g')
-          
+
+          echo "📡 Webhook a Make.com..."
+          echo "   Status: $ST"
+          echo "   Titulo: $TIT"
+          echo "   Video: $VR"
+
           curl -sf -X POST "$WH" \
             -H "Content-Type: application/json" \
-            -d "{\"status\":\"$ST\",\"video_url\":\"$VR\",\"titulo\":\"$TIT\",\"descripcion\":\"$DESC\"}" 2>/dev/null || true
+            -d "{\"status\":\"$ST\",\"video_url\":\"$VR\",\"titulo\":\"$TIT\",\"descripcion\":\"$DESC\"}" \
+            2>/dev/null || true
           exit 0
