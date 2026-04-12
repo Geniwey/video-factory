@@ -1,4 +1,4 @@
-name: Render Short Video
+name: Dato Critico - Produccion y Distribucion
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -7,10 +7,15 @@ on:
   repository_dispatch:
     types: [render-video]
 
+permissions:
+  contents: write
+  actions: write
+  id-token: write
+
 jobs:
-  render:
+  render-and-publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
 
     steps:
       - uses: actions/checkout@v4
@@ -19,7 +24,9 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg bc file
-          pip install --quiet openai-whisper edge-tts
+          
+          pip install --quiet openai-whisper edge-tts youtube-upload requests
+          
           mkdir -p ~/.fonts
           wget -q -O ~/.fonts/Montserrat-Black.ttf \
             "https://github.com/google/fonts/raw/main/ofl/montserrat/static/Montserrat-Black.ttf" || true
@@ -28,158 +35,65 @@ jobs:
       - name: Download and prepare assets
         run: |
           set +e
-
-          # Descargar video de fondo
           VIDEO_URL=$(echo "${{ github.event.client_payload.video_url }}" | tr -d '\r\n" ' | sed 's/^null$//i' | sed 's/^undefined$//i')
           if [ -n "$VIDEO_URL" ]; then
-            echo "📥 Descargando video Pexels..."
             curl -L -f -A "Mozilla/5.0" --connect-timeout 20 --max-time 120 -o pexels.mp4 "$VIDEO_URL" 2>/dev/null
           fi
 
-          # Verificar que el video es real
           if [ -s "pexels.mp4" ]; then
             mime=$(file -b --mime-type pexels.mp4 2>/dev/null)
-            if echo "$mime" | grep -q "video"; then
-              echo "✅ Video Pexels OK ($(wc -c < pexels.mp4) bytes)"
-            else
-              echo "⚠️ No es video real, descartando"
+            if ! echo "$mime" | grep -q "video"; then
               rm -f pexels.mp4
             fi
           fi
 
-          # Si no hay video, generar fondo oscuro animado
           if [ ! -s "pexels.mp4" ]; then
-            echo "🎨 Generando fondo oscuro..."
-            ffmpeg -y -f lavfi \
-              -i "color=c=0x0a0e27:s=1080x1920:d=60:r=30" \
+            ffmpeg -y -f lavfi -i "color=c=0x0a0e27:s=1080x1920:d=60:r=30" \
               -vf "vignette=PI/2.5,noise=alls=4:allf=t,eq=brightness=-0.05:contrast=1.2" \
-              -c:v libx264 -preset ultrafast -crf 28 -pix_fmt yuv420p \
-              -t 60 pexels.mp4 2>/dev/null || true
+              -c:v libx264 -preset ultrafast -crf 28 -pix_fmt yuv420p -t 60 pexels.mp4 2>/dev/null || true
           fi
 
-          # Generar audio con Edge-TTS
           TEXTO="${{ github.event.client_payload.script_text }}"
-          if [ -z "$TEXTO" ]; then
-            TEXTO="Lo que acaba de pasar en tecnologia va a cambiar todo y nadie te lo esta contando"
-          fi
+          [ -z "$TEXTO" ] && TEXTO="Lo que acaba de pasar en tecnologia va a cambiar todo."
           echo "$TEXTO" | head -c 5000 > script.txt
 
-          echo "🎙️ Generando voz..."
-          edge-tts \
-            --voice "es-ES-AlvaroNeural" \
-            --rate="+5%" \
-            --pitch="-3Hz" \
-            --file script.txt \
-            --write-media audio.mp3 2>/dev/null || true
+          edge-tts --voice "es-ES-AlvaroNeural" --rate="+5%" --pitch="-3Hz" --file script.txt --write-media audio.mp3 2>/dev/null || true
+          [ -s "audio.mp3" ] && ffmpeg -y -i audio.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null
+          [ ! -s "audio.wav" ] && ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=mono -t 5 -c:a pcm_s16le audio.wav 2>/dev/null
 
-          if [ -s "audio.mp3" ]; then
-            ffmpeg -y -i audio.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null
-            echo "✅ Audio generado"
-          fi
-
-          # Emergencia si no hay audio
-          if [ ! -s "audio.wav" ]; then
-            echo "⚠️ Audio de emergencia"
-            ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=mono -t 5 -c:a pcm_s16le audio.wav 2>/dev/null
-          fi
-
-          # Guardar duracion
-          DURATION=$(ffprobe -v quiet -show_entries format=duration \
-            -of default=noprint_wrappers=1:nokey=1 audio.wav 2>/dev/null || echo "5")
+          DURATION=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 audio.wav 2>/dev/null || echo "5")
           [ -z "$DURATION" ] || [ "$DURATION" = "N/A" ] && DURATION="5"
           echo "$DURATION" > dur.txt
-          echo "⏱️ Duración: ${DURATION}s"
 
       - name: Generate subtitles
         run: |
           set +e
-          echo "📝 Transcribiendo..."
-
-          whisper audio.wav \
-            --model small \
-            --language es \
-            --output_format json \
-            --word_timestamps True \
-            --output_dir . 2>/dev/null || true
+          whisper audio.wav --model small --language es --output_format json --word_timestamps True --output_dir . 2>/dev/null || true
 
           cat << 'PYEOF' > gen_subs.py
           import json, os
-
           def generate():
-              if not os.path.exists("audio.json"):
-                  return False
-
-              with open("audio.json") as f:
-                  data = json.load(f)
-
-              words = []
-              for seg in data.get("segments", []):
-                  for w in seg.get("words", []):
-                      if w.get("word", "").strip():
-                          words.append(w)
-
-              if len(words) < 2:
-                  return False
-
-              header = "[Script Info]\n"
-              header += "ScriptType: v4.00+\n"
-              header += "PlayResX: 1080\n"
-              header += "PlayResY: 1920\n\n"
-              header += "[V4+ Styles]\n"
-              header += "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-              header += "Style: Default,Montserrat Black,90,&H00FFFFFF,&H0000D7FF,&H00000000,&HBB000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,700,1\n\n"
-              header += "[Events]\n"
-              header += "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
-
-              def fmt(s):
-                  h = int(s // 3600)
-                  m = int((s % 3600) // 60)
-                  sec = int(s % 60)
-                  cs = min(int(round((s % 1) * 100)), 99)
-                  return f"{h}:{m:02d}:{sec:02d}.{cs:02d}"
-
+              if not os.path.exists("audio.json"): return False
+              with open("audio.json") as f: data = json.load(f)
+              words = [w for seg in data.get("segments", []) for w in seg.get("words", []) if w.get("word", "").strip()]
+              if len(words) < 2: return False
+              header = "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Montserrat Black,90,&H00FFFFFF,&H0000D7FF,&H00000000,&HBB000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,700,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+              def fmt(s): return f"{int(s//3600)}:{int((s%3600)//60):02d}:{int(s%60):02d}.{min(int(round((s%1)*100)),99):02d}"
               lines = []
               for i in range(0, len(words), 3):
-                  chunk = words[i:i + 3]
-                  if not chunk:
-                      continue
+                  chunk = words[i:i+3]
+                  if not chunk: continue
                   for j, cw in enumerate(chunk):
                       parts = []
                       for k, w in enumerate(chunk):
                           clean = w["word"].strip().upper().replace("{", "").replace("}", "")
-                          if k == j:
-                              parts.append("{\\c&H0000D7FF\\fscx115\\fscy115}" + clean + "{\\c&H00FFFFFF\\fscx100\\fscy100}")
-                          else:
-                              parts.append(clean)
+                          parts.append(f"{{\\c&H0000D7FF\\fscx115\\fscy115}}{clean}{{\\c&H00FFFFFF\\fscx100\\fscy100}}" if k == j else clean)
                       lines.append(f"Dialogue: 0,{fmt(cw['start'])},{fmt(cw['end'])},Default,,0,0,0,,{' '.join(parts)}")
-
-              with open("subtitles.ass", "w") as f:
-                  f.write(header)
-                  for line in lines:
-                      f.write(line + "\n")
-
-              print(f"OK {len(lines)} lineas")
+              with open("subtitles.ass", "w") as f: f.write(header + "\n".join(lines) + "\n")
               return True
-
-          try:
-              if not generate():
-                  raise Exception("sin datos")
-          except Exception as e:
-              print(f"Fallback: {e}")
-              fb = "[Script Info]\n"
-              fb += "ScriptType: v4.00+\n"
-              fb += "PlayResX: 1080\n"
-              fb += "PlayResY: 1920\n\n"
-              fb += "[V4+ Styles]\n"
-              fb += "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-              fb += "Style: Default,Montserrat,80,&H00FFFFFF,&H0000D7FF,&H00000000,&HBB000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,700,1\n\n"
-              fb += "[Events]\n"
-              fb += "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
-              fb += "Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,\n"
-              with open("subtitles.ass", "w") as f:
-                  f.write(fb)
+          if not generate():
+              with open("subtitles.ass", "w") as f: f.write("[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Montserrat,80,&H00FFFFFF,&H0000D7FF,&H00000000,&HBB000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,700,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,\n")
           PYEOF
-
           python3 gen_subs.py || true
 
       - name: Render final video
@@ -188,126 +102,138 @@ jobs:
           DUR=$(cat dur.txt)
           SAFE_DUR=$(printf '%.2f' "$DUR")
 
-          echo "🎬 Renderizando (${SAFE_DUR}s)..."
-
-          # INTENTO 1: Fondo Pexels + Subtitulos + Barra de progreso
-          ffmpeg -y \
-            -stream_loop -1 -i pexels.mp4 \
-            -i audio.wav \
-            -filter_complex "\
-              [0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,eq=brightness=-0.08:saturation=1.1[bg]; \
-              [bg]ass=subtitles.ass[subs]; \
-              [subs]drawbox=x=0:y=0:w='min(iw\,iw*t/${SAFE_DUR})':h=10:color=0xFFD700@0.9:t=fill[final]" \
-            -map "[final]" \
-            -map 1:a \
-            -c:v libx264 -preset medium -crf 20 -pix_fmt yuv420p \
-            -c:a aac -b:a 192k -ar 44100 \
-            -movflags +faststart \
-            -t "$DUR" \
-            output.mp4 2>/tmp/r1.log
-
-          if [ $? -eq 0 ] && [ -s "output.mp4" ]; then
-            echo "✅ Render completo"
-          else
-            echo "⚠️ Fallo render 1, intentando sin subs..."
-            tail -5 /tmp/r1.log 2>/dev/null || true
-
-            # INTENTO 2: Fondo + Audio (sin subtitulos)
-            ffmpeg -y \
-              -stream_loop -1 -i pexels.mp4 \
-              -i audio.wav \
-              -filter_complex "\
-                [0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[final]" \
-              -map "[final]" \
-              -map 1:a \
-              -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p \
-              -c:a aac -b:a 192k \
-              -t "$DUR" \
-              output.mp4 2>/dev/null
-
-            if [ $? -eq 0 ] && [ -s "output.mp4" ]; then
-              echo "✅ Render sin subs"
-            else
-              # INTENTO 3: Emergencia total
-              echo "⚠️ Emergencia..."
-              ffmpeg -y \
-                -f lavfi -i "color=c=0x0a0e27:s=1080x1920:d=${DUR}:r=30" \
-                -i audio.wav \
-                -c:v libx264 -preset ultrafast -crf 28 -pix_fmt yuv420p \
-                -c:a aac -b:a 128k \
-                -t "$DUR" -shortest \
-                output.mp4 2>/dev/null || true
-            fi
+          ffmpeg -y -stream_loop -1 -i pexels.mp4 -i audio.wav -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,eq=brightness=-0.08:saturation=1.1[bg];[bg]ass=subtitles.ass[subs];[subs]drawbox=x=0:y=0:w='min(iw\,iw*t/${SAFE_DUR})':h=10:color=0xFFD700@0.9:t=fill[final]" -map "[final]" -map 1:a -c:v libx264 -preset medium -crf 20 -pix_fmt yuv420p -c:a aac -b:a 192k -ar 44100 -movflags +faststart -t "$DUR" output.mp4 2>/dev/null
+          
+          if [ ! -s "output.mp4" ]; then
+            ffmpeg -y -f lavfi -i "color=c=0x0a0e27:s=1080x1920:d=${DUR}:r=30" -i audio.wav -c:v libx264 -preset ultrafast -crf 28 -pix_fmt yuv420p -c:a aac -b:a 128k -t "$DUR" -shortest output.mp4 2>/dev/null || true
           fi
+          [ -s "output.mp4" ] || exit 1
 
-          [ -s "output.mp4" ] && echo "📦 Video: $(du -h output.mp4 | cut -f1)" || { echo "❌ FALLO"; exit 1; }
-
-      - name: Upload video
-        id: upload
+      - name: Extraer Textos
         run: |
-          set +e
-          echo "📤 Subiendo..."
+          TITULO="${{ github.event.client_payload.titulo }}"
+          DESCRIPCION="${{ github.event.client_payload.descripcion }}"
+          [ -z "$TITULO" ] && TITULO="Noticia Tecnológica 🚀"
+          [ -z "$DESCRIPCION" ] && DESCRIPCION="#tecnologia #ia #shorts"
+          echo "$TITULO" | head -c 100 > titulo.txt
+          echo "$DESCRIPCION" | head -c 5000 > descripcion.txt
 
-          for i in 1 2 3; do
-            URL=$(curl -f -A "Mozilla/5.0" --connect-timeout 30 --max-time 300 \
-              -F "reqtype=fileupload" \
-              -F "time=24h" \
-              -F "fileToUpload=@output.mp4" \
-              "https://litterbox.catbox.moe/resources/internals/api.php" 2>/dev/null || echo "")
+      - name: Publicar en YouTube
+        id: youtube
+        continue-on-error: true
+        run: |
+          cat << EOF > client_secrets.json
+          {"installed": {"client_id": "${{ secrets.YOUTUBE_CLIENT_ID }}","client_secret": "${{ secrets.YOUTUBE_CLIENT_SECRET }}","redirect_uris": ["http://localhost:8080/"],"auth_uri": "https://accounts.google.com/o/oauth2/auth","token_uri": "https://oauth2.googleapis.com/token"}}
+          EOF
+          cat << EOF > youtube_token.json
+          {"access_token": "placeholder","refresh_token": "${{ secrets.YOUTUBE_REFRESH_TOKEN }}","token_type": "Bearer","expires_in": 3600}
+          EOF
+          
+          youtube-upload --client-secrets=client_secrets.json --credentials-file=youtube_token.json --title="$(cat titulo.txt)" --description="$(cat descripcion.txt)" --category="28" --privacy="public" output.mp4 > youtube_id.txt 2>&1
+          if [ $? -eq 0 ]; then echo "youtube_status=✅ OK" >> $GITHUB_OUTPUT; else echo "youtube_status=❌ Fallo" >> $GITHUB_OUTPUT; fi
 
-            if echo "$URL" | grep -q "^https://"; then
-              echo "✅ $URL"
-              echo "video_url=$URL" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-            echo "   Reintentando en 10s..."
-            sleep 10
-          done
+      - name: Publicar en TikTok
+        id: tiktok
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat << 'PYTHON_TK' > publicar_tk.py
+          import os, requests, subprocess
+          
+          client_key = os.environ.get("TIKTOK_CLIENT_KEY")
+          client_secret = os.environ.get("TIKTOK_CLIENT_SECRET")
+          refresh_token = os.environ.get("TIKTOK_REFRESH_TOKEN")
+          access_token = os.environ.get("TIKTOK_ACCESS_TOKEN")
+          
+          if all([client_key, client_secret, refresh_token]):
+              try:
+                  res = requests.post("https://open.tiktokapis.com/v2/oauth/token/", data={"client_key": client_key, "client_secret": client_secret, "grant_type": "refresh_token", "refresh_token": refresh_token}).json()
+                  if "data" in res and "access_token" in res["data"]:
+                      access_token = res["data"]["access_token"]
+                      subprocess.run(["gh", "secret", "set", "TIKTOK_ACCESS_TOKEN", "-b", access_token])
+                      subprocess.run(["gh", "secret", "set", "TIKTOK_REFRESH_TOKEN", "-b", res["data"].get("refresh_token", refresh_token)])
+              except: pass
+          
+          if not access_token: exit(1)
+          
+          cap = open("titulo.txt").read().strip() + "\n\n" + open("descripcion.txt").read().strip()
+          size = os.path.getsize("output.mp4")
+          headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json; charset=UTF-8"}
+          
+          init_data = requests.post("https://open.tiktokapis.com/v2/post/publish/video/init/", headers=headers, json={"post_info": {"title": cap[:150], "privacy_level": "PUBLIC_TO_EVERYONE", "disable_duet": False, "disable_comment": False, "disable_stitch": False}, "source_info": {"source": "FILE_UPLOAD", "video_size": size, "chunk_size": size, "total_chunk_count": 1}}).json()
+          
+          if "data" not in init_data: exit(1)
+          
+          requests.put(init_data["data"]["upload_url"], headers={"Content-Type": "video/mp4", "Content-Length": str(size)}, data=open("output.mp4", "rb").read())
+          requests.post("https://open.tiktokapis.com/v2/post/publish/status/fetch/", headers=headers, json={"publish_id": init_data["data"]["publish_id"]})
+          exit(0)
+          PYTHON_TK
+          
+          export TIKTOK_CLIENT_KEY="${{ secrets.TIKTOK_CLIENT_KEY }}"
+          export TIKTOK_CLIENT_SECRET="${{ secrets.TIKTOK_CLIENT_SECRET }}"
+          export TIKTOK_REFRESH_TOKEN="${{ secrets.TIKTOK_REFRESH_TOKEN }}"
+          export TIKTOK_ACCESS_TOKEN="${{ secrets.TIKTOK_ACCESS_TOKEN }}"
+          
+          python3 publicar_tk.py
+          if [ $? -eq 0 ]; then echo "tiktok_status=✅ OK" >> $GITHUB_OUTPUT; else echo "tiktok_status=❌ Fallo" >> $GITHUB_OUTPUT; fi
 
-          echo "video_url=UPLOAD_FAILED" >> $GITHUB_OUTPUT
-          exit 0
+      - name: Publicar en Instagram
+        id: instagram
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat << 'PYTHON_IG' > publicar_ig.py
+          import os, requests, time, subprocess, datetime
+          
+          tag = f"temp-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}"
+          repo = os.environ.get("GITHUB_REPOSITORY")
+          subprocess.run(["gh", "release", "create", tag, "output.mp4", "--title", tag, "--repo", repo])
+          url_res = subprocess.run(["gh", "api", f"repos/{repo}/releases/tags/{tag}", "--jq", ".assets[0].browser_download_url"], capture_output=True, text=True)
+          video_url = url_res.stdout.strip()
+          
+          access_token = os.environ.get("INSTAGRAM_ACCESS_TOKEN")
+          user_id = os.environ.get("INSTAGRAM_USER_ID")
+          cap = open("titulo.txt").read().strip() + "\n\n" + open("descripcion.txt").read().strip()
+          base = "https://graph.facebook.com/v21.0"
+          
+          try:
+              c_res = requests.post(f"{base}/{user_id}/media", data={'media_type': 'REELS', 'video_url': video_url, 'caption': cap, 'access_token': access_token}).json()
+              cid = c_res['id']
+              
+              for _ in range(30):
+                  time.sleep(10)
+                  stat = requests.get(f"{base}/{cid}", params={'fields': 'status_code', 'access_token': access_token}).json().get('status_code')
+                  if stat == 'FINISHED': break
+                  if stat == 'ERROR': raise Exception("Error de IG")
+              
+              requests.post(f"{base}/{user_id}/media_publish", data={'creation_id': cid, 'access_token': access_token}).raise_for_status()
+              success = True
+          except:
+              success = False
+          finally:
+              subprocess.run(["gh", "release", "delete", tag, "-y", "--cleanup-tag"])
+          
+          exit(0 if success else 1)
+          PYTHON_IG
+          
+          export INSTAGRAM_ACCESS_TOKEN="${{ secrets.INSTAGRAM_ACCESS_TOKEN }}"
+          export INSTAGRAM_USER_ID="${{ secrets.INSTAGRAM_USER_ID }}"
+          export GITHUB_REPOSITORY="${{ github.repository }}"
+          
+          python3 publicar_ig.py
+          if [ $? -eq 0 ]; then echo "instagram_status=✅ OK" >> $GITHUB_OUTPUT; else echo "instagram_status=❌ Fallo" >> $GITHUB_OUTPUT; fi
 
-      - name: Artifact backup
-        if: steps.upload.outputs.video_url == 'UPLOAD_FAILED'
-        uses: actions/upload-artifact@v4
-        with:
-          name: video-final
-          path: output.mp4
-          retention-days: 1
-
-      - name: Webhook to Make
+      - name: Notificar a Telegram
         if: always()
         run: |
-          set +e
-          WH="${{ secrets.WEBHOOK_URL }}"
-          [ -z "$WH" ] && exit 0
-
-          VR="${{ steps.upload.outputs.video_url }}"
-
-          # Leer titulo y descripcion del payload
-          TIT="${{ github.event.client_payload.titulo }}"
-          DESC="${{ github.event.client_payload.descripcion }}"
-
-          # Fallbacks si vienen vacios
-          [ -z "$TIT" ] && TIT="Short de Tecnologia"
-          [ -z "$DESC" ] && DESC="#tecnologia #shorts #viral #ia #noticias"
-
-          # Limpiar para JSON valido (quitar comillas dobles y saltos de linea)
-          TIT=$(echo "$TIT" | tr -d '"' | tr '\n' ' ' | head -c 100)
-          DESC=$(echo "$DESC" | tr -d '"' | tr '\n' ' ' | head -c 500)
-
-          # Determinar status
-          ST="completed"
-          [ "$VR" = "UPLOAD_FAILED" ] && ST="failed"
-          [ -z "$VR" ] && ST="failed"
-
-          echo "📡 Webhook a Make.com..."
-          echo "   Status: $ST"
-          echo "   Titulo: $TIT"
-          echo "   Video: $VR"
-
-          curl -sf -X POST "$WH" \
-            -H "Content-Type: application/json" \
-            -d "{\"status\":\"$ST\",\"video_url\":\"$VR\",\"titulo\":\"$TIT\",\"descripcion\":\"$DESC\"}" \
-            2>/dev/null || true
-          exit 0
+          TITULO=$(cat titulo.txt 2>/dev/null || echo "Sin título")
+          TITULO_CLEAN=$(echo "$TITULO" | sed 's/[_*[\]()~`>#+=|{}.!-]//g')
+          
+          MENSAJE="🤖 *Dato Crítico - Publicación*%0A%0A📹 ${TITULO_CLEAN}%0A%0A📊 ESTADOS:%0AYouTube: ${{ steps.youtube.outputs.youtube_status || '⚠️ Error' }}%0ATikTok: ${{ steps.tiktok.outputs.tiktok_status || '⚠️ Error' }}%0AInstagram: ${{ steps.instagram.outputs.instagram_status || '⚠️ Error' }}"
+          
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d text="$MENSAJE" \
+            -d parse_mode="Markdown"
