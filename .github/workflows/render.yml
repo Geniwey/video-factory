@@ -21,28 +21,24 @@ jobs:
       - uses: actions/checkout@v4
 
       # ============================================
-      # 🛠️ PASO 1: SETUP (CORREGIDO PARA UBUNTU 24.04)
+      # 🛠️ PASO 1: SETUP
       # ============================================
       - name: Setup
         run: |
-          # SOLUCIÓN: Eliminar repositorios conflictivos de Microsoft/Azure
           echo "🧹 Limpiando repositorios problemáticos..."
           sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list 2>/dev/null || true
           sudo rm -f /etc/apt/sources.list.d/azure-cli.list 2>/dev/null || true
           sudo rm -f /etc/apt/sources.list.d/vscode.list 2>/dev/null || true
           
-          # Actualizar índices (ignorando errores de repos eliminados)
           echo "📦 Actualizando repositorios..."
           sudo apt-get update -qq 2>&1 | grep -v "Failed to fetch" || true
           
-          # Instalar dependencias críticas
           echo "⚙️ Instalando dependencias del sistema..."
           sudo apt-get install -y -qq \
             ffmpeg bc file xvfb chromium-browser chromium-chromedriver \
             fonts-liberation libnss3 libatk-bridge2.0-0 libgbm1 \
             2>&1 | grep -v "debconf: unable to initialize frontend" || true
           
-          # Instalar dependencias Python
           echo "🐍 Instalando librerías Python..."
           pip install --quiet --upgrade pip 2>/dev/null
           pip install --quiet \
@@ -50,7 +46,6 @@ jobs:
             google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client \
             2>/dev/null
           
-          # Configurar fuentes
           echo "🔤 Configurando fuentes..."
           mkdir -p ~/.fonts
           wget -q -O ~/.fonts/Montserrat-Black.ttf \
@@ -66,14 +61,12 @@ jobs:
         run: |
           set +e
           
-          # Descargar video de Pexels
           VIDEO_URL=$(echo "${{ github.event.client_payload.video_url }}" | tr -d '\r\n" ' | sed 's/^null$//i' | sed 's/^undefined$//i')
           if [ -n "$VIDEO_URL" ]; then
             echo "📥 Descargando video Pexels..."
             curl -L -f -A "Mozilla/5.0" --connect-timeout 20 --max-time 120 -o pexels.mp4 "$VIDEO_URL" 2>/dev/null
           fi
 
-          # Verificar que sea video válido
           if [ -s "pexels.mp4" ]; then
             mime=$(file -b --mime-type pexels.mp4 2>/dev/null)
             if ! echo "$mime" | grep -q "video"; then
@@ -84,7 +77,6 @@ jobs:
             fi
           fi
 
-          # Generar fondo de respaldo si no hay video
           if [ ! -s "pexels.mp4" ]; then
             echo "🎨 Generando fondo oscuro animado..."
             ffmpeg -y -f lavfi -i "color=c=0x0a0e27:s=1080x1920:d=60:r=30" \
@@ -93,13 +85,11 @@ jobs:
               2>&1 | grep -v "deprecated" || true
           fi
 
-          # Preparar script de audio
           TEXTO="${{ github.event.client_payload.script_text }}"
           [ -z "$TEXTO" ] && TEXTO="Lo que acaba de pasar en tecnologia va a cambiar todo."
           echo "$TEXTO" | head -c 5000 > script.txt
           echo "📝 Script: $(wc -w < script.txt) palabras"
 
-          # Generar audio con Edge-TTS
           echo "🎙️ Sintetizando voz..."
           edge-tts \
             --voice "es-ES-AlvaroNeural" \
@@ -108,21 +98,18 @@ jobs:
             --file script.txt \
             --write-media audio.mp3 2>/dev/null || true
 
-          # Convertir a WAV
           if [ -s "audio.mp3" ]; then
             ffmpeg -y -i audio.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio.wav \
               2>&1 | grep -v "deprecated" || true
             echo "✅ Audio generado: $(du -h audio.mp3 | cut -f1)"
           fi
 
-          # Audio de emergencia
           if [ ! -s "audio.wav" ]; then
             echo "⚠️ Generando audio de emergencia..."
             ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=mono -t 5 -c:a pcm_s16le audio.wav \
               2>&1 | grep -v "deprecated" || true
           fi
 
-          # Calcular duración
           DURATION=$(ffprobe -v quiet -show_entries format=duration \
             -of default=noprint_wrappers=1:nokey=1 audio.wav 2>/dev/null || echo "5")
           [ -z "$DURATION" ] || [ "$DURATION" = "N/A" ] && DURATION="5"
@@ -236,7 +223,6 @@ jobs:
 
           echo "🎬 Renderizando video final (${SAFE_DUR}s)..."
 
-          # Intento 1: Render completo con todos los efectos
           ffmpeg -y \
             -stream_loop -1 -i pexels.mp4 \
             -i audio.wav \
@@ -257,7 +243,6 @@ jobs:
           else
             echo "⚠️ Render 1 falló, intentando render simplificado..."
             
-            # Intento 2: Sin barra de progreso
             ffmpeg -y \
               -stream_loop -1 -i pexels.mp4 \
               -i audio.wav \
@@ -274,7 +259,6 @@ jobs:
             if [ ! -s "output.mp4" ]; then
               echo "⚠️ Render 2 falló, modo emergencia..."
               
-              # Intento 3: Solo fondo + audio
               ffmpeg -y \
                 -f lavfi -i "color=c=0x0a0e27:s=1080x1920:d=${DUR}:r=30" \
                 -i audio.wav \
@@ -311,15 +295,32 @@ jobs:
           echo "📝 Descripción: $(echo "$DESCRIPCION" | head -c 100)..."
 
       # ============================================
-      # 📺 PASO 6: PUBLICAR EN YOUTUBE
+      # 📺 PASO 6: PUBLICAR EN YOUTUBE (CORREGIDO)
       # ============================================
       - name: Publicar en YouTube
         id: youtube
         continue-on-error: true
+        env:
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          YOUTUBE_ACCESS_TOKEN: ${{ secrets.YOUTUBE_ACCESS_TOKEN }}
         run: |
+          # Verificar que los secrets existen
+          echo "🔍 Verificando credenciales de YouTube..."
+          if [ -z "$YOUTUBE_CLIENT_ID" ] || [ -z "$YOUTUBE_CLIENT_SECRET" ] || [ -z "$YOUTUBE_REFRESH_TOKEN" ]; then
+            echo "❌ ERROR: Faltan secrets de YouTube"
+            echo "   YOUTUBE_CLIENT_ID: ${YOUTUBE_CLIENT_ID:0:10}..."
+            echo "   YOUTUBE_CLIENT_SECRET: ${YOUTUBE_CLIENT_SECRET:0:10}..."
+            echo "   YOUTUBE_REFRESH_TOKEN: ${YOUTUBE_REFRESH_TOKEN:0:10}..."
+            exit 1
+          fi
+          
+          echo "✅ Secrets encontrados correctamente"
+          
           cat << 'PYTHON_YT' > publicar_youtube.py
           import os
-          import pickle
+          import sys
           from google.auth.transport.requests import Request
           from google.oauth2.credentials import Credentials
           from googleapiclient.discovery import build
@@ -328,25 +329,43 @@ jobs:
           SCOPES = ['https://www.googleapis.com/auth/youtube.upload']
 
           def upload_video():
-              # Crear credenciales desde secrets
+              # Leer variables de entorno
+              client_id = os.environ.get('YOUTUBE_CLIENT_ID')
+              client_secret = os.environ.get('YOUTUBE_CLIENT_SECRET')
+              refresh_token = os.environ.get('YOUTUBE_REFRESH_TOKEN')
+              access_token = os.environ.get('YOUTUBE_ACCESS_TOKEN', 'dummy')
+              
+              print(f"🔑 Client ID: {client_id[:20] if client_id else 'MISSING'}...")
+              print(f"🔑 Client Secret: {client_secret[:20] if client_secret else 'MISSING'}...")
+              print(f"🔑 Refresh Token: {refresh_token[:20] if refresh_token else 'MISSING'}...")
+              
+              if not all([client_id, client_secret, refresh_token]):
+                  print("❌ ERROR: Credenciales incompletas")
+                  sys.exit(1)
+              
+              # Crear credenciales
               token_data = {
-                  'token': os.environ.get('YOUTUBE_ACCESS_TOKEN', 'dummy'),
-                  'refresh_token': os.environ['YOUTUBE_REFRESH_TOKEN'],
+                  'token': access_token,
+                  'refresh_token': refresh_token,
                   'token_uri': 'https://oauth2.googleapis.com/token',
-                  'client_id': os.environ['YOUTUBE_CLIENT_ID'],
-                  'client_secret': os.environ['YOUTUBE_CLIENT_SECRET'],
+                  'client_id': client_id,
+                  'client_secret': client_secret,
                   'scopes': SCOPES
               }
               
               creds = Credentials.from_authorized_user_info(token_data, SCOPES)
               
+              # Refrescar si está expirado
               if creds and creds.expired and creds.refresh_token:
+                  print("🔄 Refrescando token...")
                   creds.refresh(Request())
               
               youtube = build('youtube', 'v3', credentials=creds)
               
               titulo = open('titulo.txt').read().strip()
               descripcion = open('descripcion.txt').read().strip()
+              
+              print(f"📹 Subiendo: {titulo}")
               
               request_body = {
                   'snippet': {
@@ -382,16 +401,13 @@ jobs:
 
           try:
               upload_video()
-              exit(0)
+              sys.exit(0)
           except Exception as e:
               print(f"❌ Error: {e}")
-              exit(1)
+              import traceback
+              traceback.print_exc()
+              sys.exit(1)
           PYTHON_YT
-          
-          export YOUTUBE_CLIENT_ID="${{ secrets.YOUTUBE_CLIENT_ID }}"
-          export YOUTUBE_CLIENT_SECRET="${{ secrets.YOUTUBE_CLIENT_SECRET }}"
-          export YOUTUBE_REFRESH_TOKEN="${{ secrets.YOUTUBE_REFRESH_TOKEN }}"
-          export YOUTUBE_ACCESS_TOKEN="${{ secrets.YOUTUBE_ACCESS_TOKEN }}"
           
           python3 publicar_youtube.py
           
@@ -402,16 +418,28 @@ jobs:
           fi
 
       # ============================================
-      # 🎵 PASO 7: PUBLICAR EN TIKTOK
+      # 🎵 PASO 7: PUBLICAR EN TIKTOK (CORREGIDO)
       # ============================================
       - name: Publicar en TikTok
         id: tiktok
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
+          TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
+          TIKTOK_REFRESH_TOKEN: ${{ secrets.TIKTOK_REFRESH_TOKEN }}
+          TIKTOK_ACCESS_TOKEN: ${{ secrets.TIKTOK_ACCESS_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
+          echo "🔍 Verificando credenciales de TikTok..."
+          echo "   Client Key: ${TIKTOK_CLIENT_KEY:0:10}..."
+          echo "   Client Secret: ${TIKTOK_CLIENT_SECRET:0:10}..."
+          echo "   Refresh Token: ${TIKTOK_REFRESH_TOKEN:0:10}..."
+          echo "   Access Token: ${TIKTOK_ACCESS_TOKEN:0:10}..."
+          
           cat << 'PYTHON_TK' > publicar_tk.py
           import os
+          import sys
           import requests
           import subprocess
 
@@ -420,6 +448,10 @@ jobs:
               client_secret = os.environ.get("TIKTOK_CLIENT_SECRET")
               refresh_token = os.environ.get("TIKTOK_REFRESH_TOKEN")
               access_token = os.environ.get("TIKTOK_ACCESS_TOKEN")
+              
+              print(f"🔑 Client Key: {client_key[:20] if client_key else 'MISSING'}...")
+              print(f"🔑 Refresh Token: {refresh_token[:20] if refresh_token else 'MISSING'}...")
+              print(f"🔑 Current Access Token: {access_token[:20] if access_token else 'MISSING'}...")
               
               if not all([client_key, client_secret, refresh_token]):
                   print("⚠️ Configuración de renovación incompleta, usando token existente")
@@ -445,13 +477,13 @@ jobs:
                       
                       print("✅ Token renovado")
                       
-                      # Guardar permanentemente en GitHub Secrets
+                      # Guardar en GitHub Secrets
                       subprocess.run(["gh", "secret", "set", "TIKTOK_ACCESS_TOKEN", "-b", new_token], check=False)
                       subprocess.run(["gh", "secret", "set", "TIKTOK_REFRESH_TOKEN", "-b", new_refresh], check=False)
                       
                       return new_token
                   else:
-                      print("⚠️ No se pudo renovar, usando token existente")
+                      print(f"⚠️ Respuesta de renovación: {result}")
                       return access_token
               except Exception as e:
                   print(f"⚠️ Error renovando: {e}")
@@ -464,6 +496,8 @@ jobs:
                   print("❌ No hay token de acceso")
                   return False
               
+              print(f"🎯 Usando token: {access_token[:30]}...")
+              
               titulo = open("titulo.txt").read().strip()
               descripcion = open("descripcion.txt").read().strip()
               caption = f"{titulo}\n\n{descripcion}"[:150]
@@ -475,7 +509,6 @@ jobs:
                   "Content-Type": "application/json; charset=UTF-8"
               }
               
-              # Inicializar subida
               print("📤 Iniciando subida a TikTok...")
               init_payload = {
                   "post_info": {
@@ -509,7 +542,6 @@ jobs:
                   upload_url = init_data["data"]["upload_url"]
                   publish_id = init_data["data"]["publish_id"]
                   
-                  # Subir video
                   print("📤 Subiendo video...")
                   with open("output.mp4", "rb") as f:
                       video_data = f.read()
@@ -535,18 +567,14 @@ jobs:
                   
               except Exception as e:
                   print(f"❌ Error: {e}")
+                  import traceback
+                  traceback.print_exc()
                   return False
 
           if __name__ == "__main__":
               success = publicar_tiktok()
-              exit(0 if success else 1)
+              sys.exit(0 if success else 1)
           PYTHON_TK
-          
-          export TIKTOK_CLIENT_KEY="${{ secrets.TIKTOK_CLIENT_KEY }}"
-          export TIKTOK_CLIENT_SECRET="${{ secrets.TIKTOK_CLIENT_SECRET }}"
-          export TIKTOK_REFRESH_TOKEN="${{ secrets.TIKTOK_REFRESH_TOKEN }}"
-          export TIKTOK_ACCESS_TOKEN="${{ secrets.TIKTOK_ACCESS_TOKEN }}"
-          export GITHUB_REPOSITORY="${{ github.repository }}"
           
           python3 publicar_tk.py
           
@@ -557,16 +585,24 @@ jobs:
           fi
 
       # ============================================
-      # 📷 PASO 8: PUBLICAR EN INSTAGRAM
+      # 📷 PASO 8: PUBLICAR EN INSTAGRAM (CORREGIDO)
       # ============================================
       - name: Publicar en Instagram
         id: instagram
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INSTAGRAM_ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
+          INSTAGRAM_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
+          echo "🔍 Verificando credenciales de Instagram..."
+          echo "   Access Token: ${INSTAGRAM_ACCESS_TOKEN:0:20}..."
+          echo "   User ID: ${INSTAGRAM_USER_ID}..."
+          
           cat << 'PYTHON_IG' > publicar_ig.py
           import os
+          import sys
           import requests
           import time
           import subprocess
@@ -579,7 +615,6 @@ jobs:
               tag = f"temp-video-{timestamp}"
               repo = os.environ.get("GITHUB_REPOSITORY")
               
-              # Crear release
               create_cmd = [
                   "gh", "release", "create", tag,
                   "output.mp4",
@@ -594,7 +629,6 @@ jobs:
                   print(f"❌ Error creando release: {result.stderr}")
                   return None, None
               
-              # Obtener URL del asset
               list_cmd = [
                   "gh", "api",
                   f"repos/{repo}/releases/tags/{tag}",
@@ -623,6 +657,9 @@ jobs:
               access_token = os.environ.get("INSTAGRAM_ACCESS_TOKEN")
               user_id = os.environ.get("INSTAGRAM_USER_ID")
               
+              print(f"🔑 Access Token: {access_token[:30] if access_token else 'MISSING'}...")
+              print(f"🔑 User ID: {user_id}")
+              
               if not access_token or not user_id:
                   print("❌ Credenciales de Instagram no configuradas")
                   return False
@@ -639,7 +676,6 @@ jobs:
                   
                   base_url = "https://graph.facebook.com/v21.0"
                   
-                  # Crear contenedor
                   print("🎬 Creando Reel en Instagram...")
                   container_url = f"{base_url}/{user_id}/media"
                   container_params = {
@@ -661,7 +697,6 @@ jobs:
                   creation_id = container_data['id']
                   print(f"✅ Contenedor creado: {creation_id}")
                   
-                  # Esperar procesamiento
                   print("⏳ Esperando procesamiento...")
                   max_attempts = 30
                   
@@ -690,7 +725,6 @@ jobs:
                       print("⏱️ Timeout procesamiento")
                       return False
                   
-                  # Publicar
                   print("🚀 Publicando Reel...")
                   publish_url = f"{base_url}/{user_id}/media_publish"
                   publish_params = {
@@ -716,18 +750,16 @@ jobs:
                   
               except Exception as e:
                   print(f"❌ Error: {e}")
+                  import traceback
+                  traceback.print_exc()
                   return False
               finally:
                   limpiar_release(release_tag)
 
           if __name__ == "__main__":
               success = publicar_instagram()
-              exit(0 if success else 1)
+              sys.exit(0 if success else 1)
           PYTHON_IG
-          
-          export INSTAGRAM_ACCESS_TOKEN="${{ secrets.INSTAGRAM_ACCESS_TOKEN }}"
-          export INSTAGRAM_USER_ID="${{ secrets.INSTAGRAM_USER_ID }}"
-          export GITHUB_REPOSITORY="${{ github.repository }}"
           
           python3 publicar_ig.py
           
@@ -742,6 +774,9 @@ jobs:
       # ============================================
       - name: Notificar a Telegram
         if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           TITULO=$(cat titulo.txt 2>/dev/null | head -c 50 || echo "Sin título")
           TITULO_CLEAN=$(echo "$TITULO" | sed 's/[_*[\]()~`>#+=|{}.!-]//g')
@@ -759,8 +794,8 @@ jobs:
           MENSAJE+="Instagram: ${IG_STATUS}%0A"
           MENSAJE+="━━━━━━━━━━━━━━━━━━━━"
           
-          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
             -d text="$MENSAJE" \
             -d parse_mode="Markdown" \
             -d disable_web_page_preview=true || echo "⚠️ Telegram falló (no crítico)"
