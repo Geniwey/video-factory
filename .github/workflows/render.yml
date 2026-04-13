@@ -674,7 +674,7 @@ jobs:
                   descripcion = open("descripcion.txt").read().strip()
                   caption = f"{titulo}\n\n{descripcion}"
                   
-                  base_url = "https://graph.facebook.com/v21.0"
+                  base_url = "https://graph.instagram.com/v21.0"
                   
                   print("🎬 Creando Reel en Instagram...")
                   container_url = f"{base_url}/{user_id}/media"
