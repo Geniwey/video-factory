@@ -295,7 +295,7 @@ jobs:
           echo "📝 Descripción: $(echo "$DESCRIPCION" | head -c 100)..."
 
       # ============================================
-      # 📺 PASO 6: PUBLICAR EN YOUTUBE (CORREGIDO)
+      # 📺 PASO 6: PUBLICAR EN YOUTUBE
       # ============================================
       - name: Publicar en YouTube
         id: youtube
@@ -306,13 +306,9 @@ jobs:
           YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
           YOUTUBE_ACCESS_TOKEN: ${{ secrets.YOUTUBE_ACCESS_TOKEN }}
         run: |
-          # Verificar que los secrets existen
           echo "🔍 Verificando credenciales de YouTube..."
           if [ -z "$YOUTUBE_CLIENT_ID" ] || [ -z "$YOUTUBE_CLIENT_SECRET" ] || [ -z "$YOUTUBE_REFRESH_TOKEN" ]; then
             echo "❌ ERROR: Faltan secrets de YouTube"
-            echo "   YOUTUBE_CLIENT_ID: ${YOUTUBE_CLIENT_ID:0:10}..."
-            echo "   YOUTUBE_CLIENT_SECRET: ${YOUTUBE_CLIENT_SECRET:0:10}..."
-            echo "   YOUTUBE_REFRESH_TOKEN: ${YOUTUBE_REFRESH_TOKEN:0:10}..."
             exit 1
           fi
           
@@ -329,21 +325,15 @@ jobs:
           SCOPES = ['https://www.googleapis.com/auth/youtube.upload']
 
           def upload_video():
-              # Leer variables de entorno
               client_id = os.environ.get('YOUTUBE_CLIENT_ID')
               client_secret = os.environ.get('YOUTUBE_CLIENT_SECRET')
               refresh_token = os.environ.get('YOUTUBE_REFRESH_TOKEN')
               access_token = os.environ.get('YOUTUBE_ACCESS_TOKEN', 'dummy')
               
-              print(f"🔑 Client ID: {client_id[:20] if client_id else 'MISSING'}...")
-              print(f"🔑 Client Secret: {client_secret[:20] if client_secret else 'MISSING'}...")
-              print(f"🔑 Refresh Token: {refresh_token[:20] if refresh_token else 'MISSING'}...")
-              
               if not all([client_id, client_secret, refresh_token]):
                   print("❌ ERROR: Credenciales incompletas")
                   sys.exit(1)
               
-              # Crear credenciales
               token_data = {
                   'token': access_token,
                   'refresh_token': refresh_token,
@@ -355,7 +345,6 @@ jobs:
               
               creds = Credentials.from_authorized_user_info(token_data, SCOPES)
               
-              # Refrescar si está expirado
               if creds and creds.expired and creds.refresh_token:
                   print("🔄 Refrescando token...")
                   creds.refresh(Request())
@@ -418,7 +407,7 @@ jobs:
           fi
 
       # ============================================
-      # 🎵 PASO 7: PUBLICAR EN TIKTOK (CORREGIDO)
+      # 🎵 PASO 7: PUBLICAR EN TIKTOK
       # ============================================
       - name: Publicar en TikTok
         id: tiktok
@@ -432,10 +421,6 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           echo "🔍 Verificando credenciales de TikTok..."
-          echo "   Client Key: ${TIKTOK_CLIENT_KEY:0:10}..."
-          echo "   Client Secret: ${TIKTOK_CLIENT_SECRET:0:10}..."
-          echo "   Refresh Token: ${TIKTOK_REFRESH_TOKEN:0:10}..."
-          echo "   Access Token: ${TIKTOK_ACCESS_TOKEN:0:10}..."
           
           cat << 'PYTHON_TK' > publicar_tk.py
           import os
@@ -449,12 +434,8 @@ jobs:
               refresh_token = os.environ.get("TIKTOK_REFRESH_TOKEN")
               access_token = os.environ.get("TIKTOK_ACCESS_TOKEN")
               
-              print(f"🔑 Client Key: {client_key[:20] if client_key else 'MISSING'}...")
-              print(f"🔑 Refresh Token: {refresh_token[:20] if refresh_token else 'MISSING'}...")
-              print(f"🔑 Current Access Token: {access_token[:20] if access_token else 'MISSING'}...")
-              
               if not all([client_key, client_secret, refresh_token]):
-                  print("⚠️ Configuración de renovación incompleta, usando token existente")
+                  print("⚠️ Configuración de renovación incompleta")
                   return access_token
               
               try:
@@ -477,13 +458,11 @@ jobs:
                       
                       print("✅ Token renovado")
                       
-                      # Guardar en GitHub Secrets
                       subprocess.run(["gh", "secret", "set", "TIKTOK_ACCESS_TOKEN", "-b", new_token], check=False)
                       subprocess.run(["gh", "secret", "set", "TIKTOK_REFRESH_TOKEN", "-b", new_refresh], check=False)
                       
                       return new_token
                   else:
-                      print(f"⚠️ Respuesta de renovación: {result}")
                       return access_token
               except Exception as e:
                   print(f"⚠️ Error renovando: {e}")
@@ -495,8 +474,6 @@ jobs:
               if not access_token:
                   print("❌ No hay token de acceso")
                   return False
-              
-              print(f"🎯 Usando token: {access_token[:30]}...")
               
               titulo = open("titulo.txt").read().strip()
               descripcion = open("descripcion.txt").read().strip()
@@ -540,7 +517,6 @@ jobs:
                       return False
                   
                   upload_url = init_data["data"]["upload_url"]
-                  publish_id = init_data["data"]["publish_id"]
                   
                   print("📤 Subiendo video...")
                   with open("output.mp4", "rb") as f:
@@ -567,8 +543,6 @@ jobs:
                   
               except Exception as e:
                   print(f"❌ Error: {e}")
-                  import traceback
-                  traceback.print_exc()
                   return False
 
           if __name__ == "__main__":
@@ -597,8 +571,6 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           echo "🔍 Verificando credenciales de Instagram..."
-          echo "   Access Token: ${INSTAGRAM_ACCESS_TOKEN:0:20}..."
-          echo "   User ID: ${INSTAGRAM_USER_ID}..."
           
           cat << 'PYTHON_IG' > publicar_ig.py
           import os
@@ -608,7 +580,41 @@ jobs:
           import subprocess
           from datetime import datetime
 
+          def verificar_video_accesible(url, max_intentos=5):
+              """Verifica que el video sea accesible antes de enviarlo a Instagram"""
+              print(f"🔍 Verificando accesibilidad del video...")
+              
+              for intento in range(1, max_intentos + 1):
+                  try:
+                      response = requests.head(url, timeout=30, allow_redirects=True)
+                      
+                      if response.status_code == 200:
+                          content_type = response.headers.get('Content-Type', '')
+                          content_length = response.headers.get('Content-Length', '0')
+                          
+                          print(f"   ✅ URL accesible (intento {intento})")
+                          print(f"   Content-Type: {content_type}")
+                          print(f"   Tamaño: {int(content_length) / (1024*1024):.2f} MB")
+                          
+                          if 'video' in content_type or content_type == 'application/octet-stream':
+                              return True
+                          else:
+                              print(f"   ⚠️ Content-Type inesperado: {content_type}")
+                      else:
+                          print(f"   ⚠️ Status code: {response.status_code} (intento {intento})")
+                  
+                  except Exception as e:
+                      print(f"   ⚠️ Error en intento {intento}: {e}")
+                  
+                  if intento < max_intentos:
+                      wait_time = intento * 5
+                      print(f"   ⏳ Esperando {wait_time}s antes de reintentar...")
+                      time.sleep(wait_time)
+              
+              return False
+
           def obtener_url_publica():
+              """Sube el video a GitHub Release y espera propagación del CDN"""
               print("📤 Subiendo video a GitHub Release...")
               
               timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -619,7 +625,7 @@ jobs:
                   "gh", "release", "create", tag,
                   "output.mp4",
                   "--title", f"Video temporal {timestamp}",
-                  "--notes", "Temporal para Instagram",
+                  "--notes", "Temporal para Instagram - Dato Crítico",
                   "--repo", repo
               ]
               
@@ -628,6 +634,11 @@ jobs:
               if result.returncode != 0:
                   print(f"❌ Error creando release: {result.stderr}")
                   return None, None
+              
+              print(f"✅ Release creado: {tag}")
+              
+              print("⏳ Esperando procesamiento de GitHub (5s)...")
+              time.sleep(5)
               
               list_cmd = [
                   "gh", "api",
@@ -642,23 +653,57 @@ jobs:
                   return None, tag
               
               url = result.stdout.strip()
-              print(f"✅ URL pública: {url}")
+              
+              if not url or not url.startswith('http'):
+                  print(f"❌ URL inválida: {url}")
+                  return None, tag
+              
+              print(f"✅ URL obtenida: {url}")
+              
+              if not verificar_video_accesible(url):
+                  print("❌ El video no es accesible después de múltiples intentos")
+                  return None, tag
               
               return url, tag
 
           def limpiar_release(tag):
+              """Elimina el release temporal"""
               if not tag:
                   return
               print(f"🧹 Limpiando release {tag}...")
-              subprocess.run(["gh", "release", "delete", tag, "-y", "--cleanup-tag"], 
-                           capture_output=True)
+              subprocess.run(
+                  ["gh", "release", "delete", tag, "-y", "--cleanup-tag"], 
+                  capture_output=True
+              )
+
+          def obtener_detalles_error(creation_id, access_token, base_url):
+              """Obtiene detalles del error de Instagram"""
+              try:
+                  error_url = f"{base_url}/{creation_id}"
+                  error_params = {
+                      'fields': 'status_code,status',
+                      'access_token': access_token
+                  }
+                  
+                  response = requests.get(error_url, params=error_params, timeout=30)
+                  error_data = response.json()
+                  
+                  print(f"📋 Detalles del error:")
+                  print(f"   Status code: {error_data.get('status_code', 'N/A')}")
+                  print(f"   Status: {error_data.get('status', 'N/A')}")
+                  
+                  if 'error' in error_data:
+                      print(f"   Error message: {error_data['error'].get('message', 'N/A')}")
+                      print(f"   Error type: {error_data['error'].get('type', 'N/A')}")
+                      print(f"   Error code: {error_data['error'].get('code', 'N/A')}")
+              
+              except Exception as e:
+                  print(f"⚠️ No se pudieron obtener detalles del error: {e}")
 
           def publicar_instagram():
+              """Publica el video en Instagram Reels"""
               access_token = os.environ.get("INSTAGRAM_ACCESS_TOKEN")
               user_id = os.environ.get("INSTAGRAM_USER_ID")
-              
-              print(f"🔑 Access Token: {access_token[:30] if access_token else 'MISSING'}...")
-              print(f"🔑 User ID: {user_id}")
               
               if not access_token or not user_id:
                   print("❌ Credenciales de Instagram no configuradas")
@@ -667,6 +712,7 @@ jobs:
               video_url, release_tag = obtener_url_publica()
               
               if not video_url:
+                  print("❌ No se pudo obtener URL pública del video")
                   return False
               
               try:
@@ -674,10 +720,14 @@ jobs:
                   descripcion = open("descripcion.txt").read().strip()
                   caption = f"{titulo}\n\n{descripcion}"
                   
+                  if len(caption) > 2200:
+                      caption = caption[:2197] + "..."
+                  
                   base_url = "https://graph.instagram.com/v21.0"
                   
-                  print("🎬 Creando Reel en Instagram...")
+                  print("🎬 Creando contenedor de Reel en Instagram...")
                   container_url = f"{base_url}/{user_id}/media"
+                  
                   container_params = {
                       'media_type': 'REELS',
                       'video_url': video_url,
@@ -686,19 +736,37 @@ jobs:
                       'access_token': access_token
                   }
                   
-                  container_response = requests.post(container_url, data=container_params, timeout=60)
+                  print(f"   📋 Enviando petición con URL: {video_url}")
+                  
+                  container_response = requests.post(
+                      container_url, 
+                      data=container_params, 
+                      timeout=120
+                  )
+                  
                   container_response.raise_for_status()
                   container_data = container_response.json()
                   
+                  if 'error' in container_data:
+                      print(f"❌ Error en la respuesta de Instagram:")
+                      print(f"   Mensaje: {container_data['error'].get('message', 'N/A')}")
+                      print(f"   Tipo: {container_data['error'].get('type', 'N/A')}")
+                      print(f"   Código: {container_data['error'].get('code', 'N/A')}")
+                      return False
+                  
                   if 'id' not in container_data:
-                      print(f"❌ Error creando contenedor: {container_data}")
+                      print(f"❌ Respuesta inesperada: {container_data}")
                       return False
                   
                   creation_id = container_data['id']
-                  print(f"✅ Contenedor creado: {creation_id}")
+                  print(f"✅ Contenedor creado exitosamente")
+                  print(f"   Creation ID: {creation_id}")
                   
-                  print("⏳ Esperando procesamiento...")
-                  max_attempts = 30
+                  print("⏳ Esperando que Instagram procese el video...")
+                  print("   (Esto puede tardar varios minutos)")
+                  
+                  max_attempts = 60
+                  last_status = None
                   
                   for attempt in range(max_attempts):
                       time.sleep(10)
@@ -709,20 +777,41 @@ jobs:
                           'access_token': access_token
                       }
                       
-                      status_response = requests.get(status_url, params=status_params, timeout=30)
-                      status_data = status_response.json()
-                      status_code = status_data.get('status_code', 'UNKNOWN')
+                      try:
+                          status_response = requests.get(
+                              status_url, 
+                              params=status_params, 
+                              timeout=30
+                          )
+                          status_data = status_response.json()
+                          status_code = status_data.get('status_code', 'UNKNOWN')
+                          
+                          if status_code != last_status:
+                              print(f"   📊 Estado: {status_code}")
+                              last_status = status_code
+                          
+                          if status_code == 'FINISHED':
+                              print("✅ Video procesado correctamente por Instagram")
+                              break
+                          
+                          elif status_code == 'ERROR':
+                              print(f"❌ Instagram reportó un error al procesar el video")
+                              obtener_detalles_error(creation_id, access_token, base_url)
+                              return False
+                          
+                          elif status_code == 'IN_PROGRESS':
+                              if attempt % 6 == 0:
+                                  print(f"   ⏳ Procesando... ({attempt * 10}s transcurridos)")
                       
-                      if status_code == 'FINISHED':
-                          print("✅ Video procesado")
-                          break
-                      elif status_code == 'ERROR':
-                          print(f"❌ Error procesando: {status_data}")
-                          return False
-                      else:
-                          print(f"⏳ Procesando... ({attempt + 1}/{max_attempts})")
+                      except requests.exceptions.Timeout:
+                          print(f"   ⚠️ Timeout al verificar estado (intento {attempt + 1})")
+                          continue
+                      except Exception as e:
+                          print(f"   ⚠️ Error al verificar estado: {e}")
+                          continue
+                  
                   else:
-                      print("⏱️ Timeout procesamiento")
+                      print("⏱️ Timeout: Instagram no terminó de procesar el video")
                       return False
                   
                   print("🚀 Publicando Reel...")
@@ -732,19 +821,32 @@ jobs:
                       'access_token': access_token
                   }
                   
-                  publish_response = requests.post(publish_url, data=publish_params, timeout=30)
+                  publish_response = requests.post(
+                      publish_url, 
+                      data=publish_params, 
+                      timeout=60
+                  )
+                  
                   publish_response.raise_for_status()
                   publish_data = publish_response.json()
                   
+                  if 'error' in publish_data:
+                      print(f"❌ Error al publicar: {publish_data['error']}")
+                      return False
+                  
                   if 'id' not in publish_data:
-                      print(f"❌ Error publicando: {publish_data}")
+                      print(f"❌ Respuesta inesperada al publicar: {publish_data}")
                       return False
                   
                   media_id = publish_data['id']
-                  print(f"✅ Reel publicado (ID: {media_id})")
+                  print(f"✅ Reel publicado exitosamente")
+                  print(f"   Media ID: {media_id}")
                   
+                  reel_url = f"https://www.instagram.com/reel/{media_id}/"
                   with open("ig_url.txt", "w") as f:
-                      f.write(f"https://www.instagram.com/p/{media_id}/")
+                      f.write(reel_url)
+                  
+                  print(f"   URL: {reel_url}")
                   
                   return True
                   
@@ -753,6 +855,7 @@ jobs:
                   import traceback
                   traceback.print_exc()
                   return False
+              
               finally:
                   limpiar_release(release_tag)
 
@@ -799,3 +902,4 @@ jobs:
             -d text="$MENSAJE" \
             -d parse_mode="Markdown" \
             -d disable_web_page_preview=true || echo "⚠️ Telegram falló (no crítico)"
+            
