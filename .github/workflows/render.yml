@@ -559,16 +559,14 @@ jobs:
           fi
 
       # ============================================
-      # 📷 PASO 8: PUBLICAR EN INSTAGRAM (CORREGIDO)
+      # 📷 PASO 8: PUBLICAR EN INSTAGRAM (TRANSFER.SH)
       # ============================================
       - name: Publicar en Instagram
         id: instagram
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           INSTAGRAM_ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
           INSTAGRAM_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           echo "🔍 Verificando credenciales de Instagram..."
           
@@ -577,128 +575,48 @@ jobs:
           import sys
           import requests
           import time
-          import subprocess
-          from datetime import datetime
 
-          def verificar_video_accesible(url, max_intentos=5):
-              """Verifica que el video sea accesible antes de enviarlo a Instagram"""
-              print(f"🔍 Verificando accesibilidad del video...")
+          def subir_video_transfer():
+              """Sube el video a transfer.sh y obtiene URL pública"""
+              print("📤 Subiendo video a transfer.sh...")
               
-              for intento in range(1, max_intentos + 1):
-                  try:
-                      response = requests.head(url, timeout=30, allow_redirects=True)
-                      
-                      if response.status_code == 200:
-                          content_type = response.headers.get('Content-Type', '')
-                          content_length = response.headers.get('Content-Length', '0')
-                          
-                          print(f"   ✅ URL accesible (intento {intento})")
-                          print(f"   Content-Type: {content_type}")
-                          print(f"   Tamaño: {int(content_length) / (1024*1024):.2f} MB")
-                          
-                          if 'video' in content_type or content_type == 'application/octet-stream':
-                              return True
-                          else:
-                              print(f"   ⚠️ Content-Type inesperado: {content_type}")
-                      else:
-                          print(f"   ⚠️ Status code: {response.status_code} (intento {intento})")
-                  
-                  except Exception as e:
-                      print(f"   ⚠️ Error en intento {intento}: {e}")
-                  
-                  if intento < max_intentos:
-                      wait_time = intento * 5
-                      print(f"   ⏳ Esperando {wait_time}s antes de reintentar...")
-                      time.sleep(wait_time)
-              
-              return False
-
-          def obtener_url_publica():
-              """Sube el video a GitHub Release y espera propagación del CDN"""
-              print("📤 Subiendo video a GitHub Release...")
-              
-              timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-              tag = f"temp-video-{timestamp}"
-              repo = os.environ.get("GITHUB_REPOSITORY")
-              
-              create_cmd = [
-                  "gh", "release", "create", tag,
-                  "output.mp4",
-                  "--title", f"Video temporal {timestamp}",
-                  "--notes", "Temporal para Instagram - Dato Crítico",
-                  "--repo", repo
-              ]
-              
-              result = subprocess.run(create_cmd, capture_output=True, text=True)
-              
-              if result.returncode != 0:
-                  print(f"❌ Error creando release: {result.stderr}")
-                  return None, None
-              
-              print(f"✅ Release creado: {tag}")
-              
-              print("⏳ Esperando procesamiento de GitHub (5s)...")
-              time.sleep(5)
-              
-              list_cmd = [
-                  "gh", "api",
-                  f"repos/{repo}/releases/tags/{tag}",
-                  "--jq", ".assets[0].browser_download_url"
-              ]
-              
-              result = subprocess.run(list_cmd, capture_output=True, text=True)
-              
-              if result.returncode != 0:
-                  print(f"❌ Error obteniendo URL: {result.stderr}")
-                  return None, tag
-              
-              url = result.stdout.strip()
-              
-              if not url or not url.startswith('http'):
-                  print(f"❌ URL inválida: {url}")
-                  return None, tag
-              
-              print(f"✅ URL obtenida: {url}")
-              
-              if not verificar_video_accesible(url):
-                  print("❌ El video no es accesible después de múltiples intentos")
-                  return None, tag
-              
-              return url, tag
-
-          def limpiar_release(tag):
-              """Elimina el release temporal"""
-              if not tag:
-                  return
-              print(f"🧹 Limpiando release {tag}...")
-              subprocess.run(
-                  ["gh", "release", "delete", tag, "-y", "--cleanup-tag"], 
-                  capture_output=True
-              )
-
-          def obtener_detalles_error(creation_id, access_token, base_url):
-              """Obtiene detalles del error de Instagram"""
               try:
-                  error_url = f"{base_url}/{creation_id}"
-                  error_params = {
-                      'fields': 'status_code,status',
-                      'access_token': access_token
-                  }
+                  with open('output.mp4', 'rb') as f:
+                      response = requests.post(
+                          'https://transfer.sh/output.mp4',
+                          files={'file': f},
+                          headers={
+                              'Max-Days': '1',
+                              'Max-Downloads': '10'
+                          },
+                          timeout=300
+                      )
                   
-                  response = requests.get(error_url, params=error_params, timeout=30)
-                  error_data = response.json()
-                  
-                  print(f"📋 Detalles del error:")
-                  print(f"   Status code: {error_data.get('status_code', 'N/A')}")
-                  print(f"   Status: {error_data.get('status', 'N/A')}")
-                  
-                  if 'error' in error_data:
-                      print(f"   Error message: {error_data['error'].get('message', 'N/A')}")
-                      print(f"   Error type: {error_data['error'].get('type', 'N/A')}")
-                      print(f"   Error code: {error_data['error'].get('code', 'N/A')}")
+                  if response.status_code == 200:
+                      video_url = response.text.strip()
+                      print(f"✅ Video subido: {video_url}")
+                      
+                      print("🔍 Verificando accesibilidad...")
+                      time.sleep(2)
+                      
+                      verify_response = requests.head(video_url, timeout=30, allow_redirects=True)
+                      
+                      if verify_response.status_code == 200:
+                          content_length = verify_response.headers.get('Content-Length', '0')
+                          print(f"   ✅ URL verificada")
+                          print(f"   Tamaño: {int(content_length) / (1024*1024):.2f} MB")
+                          return video_url
+                      else:
+                          print(f"   ❌ URL no accesible: {verify_response.status_code}")
+                          return None
+                  else:
+                      print(f"❌ Error subiendo a transfer.sh: {response.status_code}")
+                      print(f"   Respuesta: {response.text}")
+                      return None
               
               except Exception as e:
-                  print(f"⚠️ No se pudieron obtener detalles del error: {e}")
+                  print(f"❌ Error: {e}")
+                  return None
 
           def publicar_instagram():
               """Publica el video en Instagram Reels"""
@@ -709,10 +627,10 @@ jobs:
                   print("❌ Credenciales de Instagram no configuradas")
                   return False
               
-              video_url, release_tag = obtener_url_publica()
+              video_url = subir_video_transfer()
               
               if not video_url:
-                  print("❌ No se pudo obtener URL pública del video")
+                  print("❌ No se pudo subir el video a transfer.sh")
                   return False
               
               try:
@@ -726,8 +644,9 @@ jobs:
                   base_url = "https://graph.instagram.com/v21.0"
                   
                   print("🎬 Creando contenedor de Reel en Instagram...")
-                  container_url = f"{base_url}/{user_id}/media"
+                  print(f"   📋 Video URL: {video_url}")
                   
+                  container_url = f"{base_url}/{user_id}/media"
                   container_params = {
                       'media_type': 'REELS',
                       'video_url': video_url,
@@ -736,11 +655,9 @@ jobs:
                       'access_token': access_token
                   }
                   
-                  print(f"   📋 Enviando petición con URL: {video_url}")
-                  
                   container_response = requests.post(
-                      container_url, 
-                      data=container_params, 
+                      container_url,
+                      data=container_params,
                       timeout=120
                   )
                   
@@ -748,10 +665,11 @@ jobs:
                   container_data = container_response.json()
                   
                   if 'error' in container_data:
-                      print(f"❌ Error en la respuesta de Instagram:")
-                      print(f"   Mensaje: {container_data['error'].get('message', 'N/A')}")
-                      print(f"   Tipo: {container_data['error'].get('type', 'N/A')}")
-                      print(f"   Código: {container_data['error'].get('code', 'N/A')}")
+                      print(f"❌ Error de Instagram:")
+                      error = container_data['error']
+                      print(f"   Mensaje: {error.get('message', 'N/A')}")
+                      print(f"   Tipo: {error.get('type', 'N/A')}")
+                      print(f"   Código: {error.get('code', 'N/A')}")
                       return False
                   
                   if 'id' not in container_data:
@@ -759,30 +677,32 @@ jobs:
                       return False
                   
                   creation_id = container_data['id']
-                  print(f"✅ Contenedor creado exitosamente")
+                  print(f"✅ Contenedor creado")
                   print(f"   Creation ID: {creation_id}")
                   
-                  print("⏳ Esperando que Instagram procese el video...")
-                  print("   (Esto puede tardar varios minutos)")
+                  print("⏳ Esperando procesamiento de Instagram...")
+                  print("   (Máximo 10 minutos)")
                   
                   max_attempts = 60
                   last_status = None
+                  error_count = 0
                   
                   for attempt in range(max_attempts):
                       time.sleep(10)
                       
-                      status_url = f"{base_url}/{creation_id}"
-                      status_params = {
-                          'fields': 'status_code',
-                          'access_token': access_token
-                      }
-                      
                       try:
+                          status_url = f"{base_url}/{creation_id}"
+                          status_params = {
+                              'fields': 'status_code',
+                              'access_token': access_token
+                          }
+                          
                           status_response = requests.get(
-                              status_url, 
-                              params=status_params, 
+                              status_url,
+                              params=status_params,
                               timeout=30
                           )
+                          
                           status_data = status_response.json()
                           status_code = status_data.get('status_code', 'UNKNOWN')
                           
@@ -791,30 +711,48 @@ jobs:
                               last_status = status_code
                           
                           if status_code == 'FINISHED':
-                              print("✅ Video procesado correctamente por Instagram")
+                              print("✅ Video procesado correctamente")
                               break
                           
                           elif status_code == 'ERROR':
-                              print(f"❌ Instagram reportó un error al procesar el video")
-                              obtener_detalles_error(creation_id, access_token, base_url)
+                              print("❌ Instagram reportó un error")
+                              print("")
+                              print("🔍 POSIBLES CAUSAS:")
+                              print("   1. Video no cumple especificaciones (debe ser 9:16, H.264, AAC)")
+                              print("   2. Duración fuera de rango (3-90 segundos)")
+                              print("   3. Instagram no pudo descargar el archivo")
+                              print("   4. Tamaño de archivo excede límite (< 100MB)")
                               return False
                           
                           elif status_code == 'IN_PROGRESS':
                               if attempt % 6 == 0:
-                                  print(f"   ⏳ Procesando... ({attempt * 10}s transcurridos)")
+                                  print(f"   ⏳ Procesando... ({attempt * 10}s)")
+                          
+                          error_count = 0
                       
                       except requests.exceptions.Timeout:
-                          print(f"   ⚠️ Timeout al verificar estado (intento {attempt + 1})")
+                          error_count += 1
+                          print(f"   ⚠️ Timeout verificando estado ({error_count}/3)")
+                          if error_count >= 3:
+                              print("❌ Demasiados timeouts")
+                              return False
                           continue
+                      
                       except Exception as e:
-                          print(f"   ⚠️ Error al verificar estado: {e}")
+                          error_count += 1
+                          print(f"   ⚠️ Error: {e} ({error_count}/3)")
+                          if error_count >= 3:
+                              print("❌ Demasiados errores consecutivos")
+                              return False
                           continue
                   
                   else:
-                      print("⏱️ Timeout: Instagram no terminó de procesar el video")
+                      print("⏱️ Timeout: Instagram no completó el procesamiento")
+                      print(f"   Último estado: {last_status}")
                       return False
                   
                   print("🚀 Publicando Reel...")
+                  
                   publish_url = f"{base_url}/{user_id}/media_publish"
                   publish_params = {
                       'creation_id': creation_id,
@@ -822,8 +760,8 @@ jobs:
                   }
                   
                   publish_response = requests.post(
-                      publish_url, 
-                      data=publish_params, 
+                      publish_url,
+                      data=publish_params,
                       timeout=60
                   )
                   
@@ -835,32 +773,43 @@ jobs:
                       return False
                   
                   if 'id' not in publish_data:
-                      print(f"❌ Respuesta inesperada al publicar: {publish_data}")
+                      print(f"❌ Respuesta inesperada: {publish_data}")
                       return False
                   
                   media_id = publish_data['id']
+                  reel_url = f"https://www.instagram.com/reel/{media_id}/"
+                  
                   print(f"✅ Reel publicado exitosamente")
                   print(f"   Media ID: {media_id}")
+                  print(f"   URL: {reel_url}")
                   
-                  reel_url = f"https://www.instagram.com/reel/{media_id}/"
                   with open("ig_url.txt", "w") as f:
                       f.write(reel_url)
                   
-                  print(f"   URL: {reel_url}")
-                  
                   return True
-                  
+              
               except Exception as e:
-                  print(f"❌ Error: {e}")
+                  print(f"❌ Error inesperado: {e}")
                   import traceback
                   traceback.print_exc()
                   return False
-              
-              finally:
-                  limpiar_release(release_tag)
 
           if __name__ == "__main__":
+              print("=" * 60)
+              print("📷 PUBLICADOR DE INSTAGRAM REELS - DATO CRÍTICO")
+              print("=" * 60)
+              print("")
+              
               success = publicar_instagram()
+              
+              print("")
+              print("=" * 60)
+              if success:
+                  print("✅ ÉXITO: Reel publicado en Instagram")
+              else:
+                  print("❌ FALLO: No se pudo publicar en Instagram")
+              print("=" * 60)
+              
               sys.exit(0 if success else 1)
           PYTHON_IG
           
@@ -902,4 +851,3 @@ jobs:
             -d text="$MENSAJE" \
             -d parse_mode="Markdown" \
             -d disable_web_page_preview=true || echo "⚠️ Telegram falló (no crítico)"
-            
