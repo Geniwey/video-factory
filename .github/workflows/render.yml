@@ -24,6 +24,7 @@ jobs:
       # 🛠️ PASO 1: SETUP
       # ============================================
       - name: Setup
+        timeout-minutes: 5
         run: |
           echo "🧹 Limpiando repositorios problemáticos..."
           sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list 2>/dev/null || true
@@ -58,6 +59,7 @@ jobs:
       # 📥 PASO 2: DESCARGAR Y PREPARAR ASSETS
       # ============================================
       - name: Download and prepare assets
+        timeout-minutes: 5
         run: |
           set +e
           
@@ -120,6 +122,7 @@ jobs:
       # 💬 PASO 3: GENERAR SUBTÍTULOS
       # ============================================
       - name: Generate subtitles
+        timeout-minutes: 8
         run: |
           set +e
           echo "📝 Transcribiendo con Whisper..."
@@ -216,6 +219,7 @@ jobs:
       # 🎬 PASO 4: RENDERIZAR VIDEO FINAL
       # ============================================
       - name: Render final video
+        timeout-minutes: 10
         run: |
           set +e
           DUR=$(cat dur.txt)
@@ -278,21 +282,43 @@ jobs:
           fi
 
       # ============================================
-      # 📝 PASO 5: EXTRAER METADATOS
+      # 📝 PASO 5: EXTRAER METADATOS (UTF-8 SAFE)
       # ============================================
       - name: Extraer Textos
+        timeout-minutes: 2
+        env:
+          PAYLOAD_TITULO: ${{ github.event.client_payload.titulo }}
+          PAYLOAD_DESCRIPCION: ${{ github.event.client_payload.descripcion }}
         run: |
-          TITULO="${{ github.event.client_payload.titulo }}"
-          DESCRIPCION="${{ github.event.client_payload.descripcion }}"
+          cat << 'PYTHON_EXTRACT' > extraer_textos.py
+          import os
+
+          # Leer variables limpias del entorno
+          titulo_raw = os.environ.get("PAYLOAD_TITULO", "")
+          descripcion_raw = os.environ.get("PAYLOAD_DESCRIPCION", "")
+
+          # Fallbacks por si vienen vacíos
+          if not titulo_raw or titulo_raw == "null":
+              titulo_raw = "Noticia Tecnológica Impactante 🚀"
+          if not descripcion_raw or descripcion_raw == "null":
+              descripcion_raw = "#tecnologia #ia #shorts #noticias"
+
+          # Limpiar y truncar CORRECTAMENTE en UTF-8 contando caracteres reales
+          titulo = titulo_raw.strip()[:85]
+          descripcion = descripcion_raw.strip()[:4500]
+
+          # Escribir a disco en UTF-8 puro
+          with open("titulo.txt", "w", encoding="utf-8") as f:
+              f.write(titulo)
+
+          with open("descripcion.txt", "w", encoding="utf-8") as f:
+              f.write(descripcion)
+
+          print(f"✅ Título limpio: {titulo}")
+          print(f"✅ Descripción limpia: {descripcion[:100]}...")
+          PYTHON_EXTRACT
           
-          [ -z "$TITULO" ] && TITULO="Noticia Tecnológica 🚀"
-          [ -z "$DESCRIPCION" ] && DESCRIPCION="#tecnologia #ia #shorts #noticias"
-          
-          echo "$TITULO" | head -c 100 > titulo.txt
-          echo "$DESCRIPCION" | head -c 5000 > descripcion.txt
-          
-          echo "📌 Título: $TITULO"
-          echo "📝 Descripción: $(echo "$DESCRIPCION" | head -c 100)..."
+          python3 extraer_textos.py
 
       # ============================================
       # 📺 PASO 6: PUBLICAR EN YOUTUBE
@@ -300,6 +326,7 @@ jobs:
       - name: Publicar en YouTube
         id: youtube
         continue-on-error: true
+        timeout-minutes: 10
         env:
           YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
@@ -351,8 +378,8 @@ jobs:
               
               youtube = build('youtube', 'v3', credentials=creds)
               
-              titulo = open('titulo.txt').read().strip()
-              descripcion = open('descripcion.txt').read().strip()
+              titulo = open('titulo.txt', 'r', encoding='utf-8').read().strip()
+              descripcion = open('descripcion.txt', 'r', encoding='utf-8').read().strip()
               
               print(f"📹 Subiendo: {titulo}")
               
@@ -412,6 +439,7 @@ jobs:
       - name: Publicar en TikTok
         id: tiktok
         continue-on-error: true
+        timeout-minutes: 10
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
@@ -475,8 +503,8 @@ jobs:
                   print("❌ No hay token de acceso")
                   return False
               
-              titulo = open("titulo.txt").read().strip()
-              descripcion = open("descripcion.txt").read().strip()
+              titulo = open("titulo.txt", "r", encoding="utf-8").read().strip()
+              descripcion = open("descripcion.txt", "r", encoding="utf-8").read().strip()
               caption = f"{titulo}\n\n{descripcion}"[:150]
               
               video_size = os.path.getsize("output.mp4")
@@ -559,39 +587,79 @@ jobs:
           fi
 
       # ============================================
-      # 📷 PASO 8: PUBLICAR EN INSTAGRAM (EL MIX DEFINITIVO)
+      # 📷 PASO 8: INSTAGRAM (SISTEMA REDUNDANTE V2)
       # ============================================
       - name: Publicar en Instagram
         id: instagram
         continue-on-error: true
+        timeout-minutes: 15
         env:
           INSTAGRAM_ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
           INSTAGRAM_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
         run: |
           cat << 'PYTHON_IG' > publicar_ig.py
           import os, sys, requests, time
+          from requests.adapters import HTTPAdapter
+          from requests.packages.urllib3.util.retry import Retry
 
-          def subir_video():
-              print("📤 Subiendo video a Litterbox (alta velocidad)...")
-              try:
-                  with open('output.mp4', 'rb') as f:
-                      r = requests.post(
-                          'https://litterbox.catbox.moe/resources/internals/api.php',
-                          data={'reqtype': 'fileupload', 'time': '12h'},
-                          files={'fileToUpload': f},
-                          timeout=300
-                      )
-                  if r.status_code == 200 and r.text.startswith('http'):
-                      url = r.text.strip()
-                      print(f"✅ Video subido: {url}")
-                      time.sleep(3)
-                      return url
-                  print(f"❌ Error en Litterbox: {r.status_code} - {r.text}")
-                  return None
-              except Exception as e:
-                  print(f"❌ Error: {e}")
-                  return None
+          def crear_sesion():
+              session = requests.Session()
+              retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+              adapter = HTTPAdapter(max_retries=retry)
+              session.mount('http://', adapter)
+              session.mount('https://', adapter)
+              return session
 
+          def subir_video_multi():
+              print("📤 Iniciando subida con redundancia automática...")
+              session = crear_sesion()
+              
+              servicios = [
+                  {
+                      'nombre': 'Litterbox',
+                      'url': 'https://litterbox.catbox.moe/resources/internals/api.php',
+                      'data': {'reqtype': 'fileupload', 'time': '12h'},
+                      'file_key': 'fileToUpload',
+                      'extrae_url': lambda r: r.text.strip() if r.text.startswith('http') else None
+                  },
+                  {
+                      'nombre': 'tmpfiles.org',
+                      'url': 'https://tmpfiles.org/api/v1/upload',
+                      'data': None,
+                      'file_key': 'file',
+                      'extrae_url': lambda r: r.json()['data']['url'].replace('tmpfiles.org/', 'tmpfiles.org/dl/') if 'data' in r.json() else None
+                  },
+                  {
+                      'nombre': '0x0.st',
+                      'url': 'https://0x0.st',
+                      'data': None,
+                      'file_key': 'file',
+                      'extrae_url': lambda r: r.text.strip() if r.text.startswith('http') else None
+                  }
+              ]
+
+              for srv in servicios:
+                  print(f"   ▶️ Intentando servidor: {srv['nombre']}...")
+                  try:
+                      with open('output.mp4', 'rb') as f:
+                          if srv['data']:
+                              r = session.post(srv['url'], data=srv['data'], files={srv['file_key']: f}, timeout=120)
+                          else:
+                              r = session.post(srv['url'], files={srv['file_key']: f}, timeout=120)
+
+                      if r.status_code == 200:
+                          url = srv['extrae_url'](r)
+                          if url:
+                              print(f"   ✅ ÉXITO en {srv['nombre']}: {url}")
+                              time.sleep(3) # Pausa de seguridad
+                              return url
+                      print(f"   ⚠️ Falló {srv['nombre']} (HTTP {r.status_code}) - Saltando al siguiente...")
+                  except Exception as e:
+                      print(f"   ❌ Error de conexión en {srv['nombre']}: {e} - Saltando al siguiente...")
+
+              return None
+
+          # Ejecución principal Instagram
           access_token = os.environ.get("INSTAGRAM_ACCESS_TOKEN")
           user_id = os.environ.get("INSTAGRAM_USER_ID")
           
@@ -599,19 +667,21 @@ jobs:
               print("❌ Credenciales faltantes")
               sys.exit(1)
           
-          video_url = subir_video()
+          video_url = subir_video_multi()
           if not video_url:
+              print("❌ TODOS los servidores temporales fallaron. Imposible publicar.")
               sys.exit(1)
           
           try:
-              titulo = open("titulo.txt").read().strip() if os.path.exists("titulo.txt") else ""
-              descripcion = open("descripcion.txt").read().strip() if os.path.exists("descripcion.txt") else ""
+              session = crear_sesion()
+              titulo = open("titulo.txt", "r", encoding="utf-8").read().strip() if os.path.exists("titulo.txt") else ""
+              descripcion = open("descripcion.txt", "r", encoding="utf-8").read().strip() if os.path.exists("descripcion.txt") else ""
               caption = f"{titulo}\n\n{descripcion}"[:2200]
               
               base = "https://graph.instagram.com/v21.0"
               
               print("🎬 Creando Reel...")
-              r = requests.post(
+              r = session.post(
                   f"{base}/{user_id}/media",
                   data={'media_type': 'REELS', 'video_url': video_url, 'caption': caption, 'share_to_feed': 'true', 'access_token': access_token},
                   timeout=120
@@ -619,48 +689,48 @@ jobs:
               data = r.json()
               
               if 'error' in data:
-                  print(f"❌ Error API: {data['error'].get('message','N/A')}")
+                  print(f"❌ Error API de Meta: {data['error'].get('message','N/A')}")
                   sys.exit(1)
               
               creation_id = data['id']
-              print(f"✅ Contenedor: {creation_id}")
+              print(f"✅ Contenedor Creado: {creation_id}")
               
-              print("⏳ Procesando (máx 10 min)...")
+              print("⏳ Procesando video en Meta (máx 10 min)...")
               for i in range(60):
                   time.sleep(10)
-                  s = requests.get(f"{base}/{creation_id}", params={'fields': 'status_code', 'access_token': access_token}, timeout=30).json()
+                  s = session.get(f"{base}/{creation_id}", params={'fields': 'status_code', 'access_token': access_token}, timeout=30).json()
                   status = s.get('status_code', 'UNKNOWN')
                   
                   if status == 'FINISHED':
-                      print("✅ Procesado")
+                      print("✅ Procesamiento completado")
                       break
                   elif status == 'ERROR':
-                      print("❌ Instagram rechazó el video")
+                      print("❌ Meta rechazó el formato del video o la descarga.")
                       sys.exit(1)
                   elif i % 6 == 0:
                       print(f"   ⏳ {status} ({i*10}s)")
               else:
-                  print("⏱️ Timeout")
+                  print("⏱️ Timeout esperando a Meta")
                   sys.exit(1)
               
-              print("🚀 Publicando...")
-              p = requests.post(
+              print("🚀 Lanzando publicación...")
+              p = session.post(
                   f"{base}/{user_id}/media_publish",
                   data={'creation_id': creation_id, 'access_token': access_token},
                   timeout=60
               ).json()
               
               if 'id' not in p:
-                  print(f"❌ Error al publicar: {p}")
+                  print(f"❌ Error final de publicación: {p}")
                   sys.exit(1)
               
               url = f"https://www.instagram.com/reel/{p['id']}/"
-              print(f"✅ Publicado: {url}")
-              open("ig_url.txt", "w").write(url)
+              print(f"✅ ¡BINGO! Publicado en Instagram: {url}")
+              open("ig_url.txt", "w", encoding="utf-8").write(url)
               sys.exit(0)
           
           except Exception as e:
-              print(f"❌ Error: {e}")
+              print(f"❌ Error General: {e}")
               sys.exit(1)
           PYTHON_IG
           
@@ -677,6 +747,7 @@ jobs:
       # ============================================
       - name: Notificar a Telegram
         if: always()
+        timeout-minutes: 2
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
