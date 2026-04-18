@@ -2,7 +2,6 @@ name: Dato Critico - Produccion y Distribucion
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # 🛡️ ESCUDO GLOBAL UTF-8 (Recomendación Claude #5)
   PYTHONIOENCODING: utf-8
   LANG: C.UTF-8
   LC_ALL: C.UTF-8
@@ -46,84 +45,73 @@ jobs:
           
           echo "🐍 Instalando librerías Python..."
           pip install --quiet --upgrade pip 2>/dev/null
-          pip install --quiet \
-            openai-whisper edge-tts requests \
-            google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client \
-            2>/dev/null
+          pip install --quiet openai-whisper edge-tts requests google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client 2>/dev/null
           
           echo "🔤 Configurando fuentes..."
           mkdir -p ~/.fonts
-          wget -q -O ~/.fonts/Montserrat-Black.ttf \
-            "https://github.com/google/fonts/raw/main/ofl/montserrat/static/Montserrat-Black.ttf" 2>/dev/null || true
+          wget -q -O ~/.fonts/Montserrat-Black.ttf "https://github.com/google/fonts/raw/main/ofl/montserrat/static/Montserrat-Black.ttf" 2>/dev/null || true
           fc-cache -f 2>/dev/null
-          
-          echo "✅ Setup completado correctamente"
 
       # ============================================
-      # 📝 PASO 2: EXTRAER METADATOS (UTF-8 SAFE)
+      # 📝 PASO 2: EXTRACCIÓN DIRECTA DEL JSON (BLINDAJE UTF-8)
       # ============================================
-      - name: Extraer Textos
+      - name: Extraer Textos Directamente del JSON
         timeout-minutes: 2
-        env:
-          TITULO_RAW: ${{ github.event.client_payload.titulo }}
-          DESCRIPCION_RAW: ${{ github.event.client_payload.descripcion }}
-          SCRIPT_RAW: ${{ github.event.client_payload.script_text }}
         run: |
           cat << 'PYTHON_EXTRACT' > extraer_textos.py
-          import os, sys
+          import json
+          import os
+
+          event_path = os.environ.get('GITHUB_EVENT_PATH')
           
-          # Forzar UTF-8 (Recomendación Claude #1)
-          sys.stdout.reconfigure(encoding='utf-8')
-          sys.stderr.reconfigure(encoding='utf-8')
+          with open(event_path, 'r', encoding='utf-8') as f:
+              event_data = json.load(f)
+              
+          payload = event_data.get('client_payload', {})
           
-          titulo = os.environ.get('TITULO_RAW', '').strip()
-          descripcion = os.environ.get('DESCRIPCION_RAW', '').strip()
-          script_text = os.environ.get('SCRIPT_RAW', '').strip()
+          titulo = payload.get('titulo') or 'Noticia Tecnológica 🚀'
+          descripcion = payload.get('descripcion') or '#tecnologia #shorts'
+          script_text = payload.get('script_text') or 'Lo que acaba de pasar en tecnologia va a cambiar todo.'
           
-          if not titulo or titulo == 'null': titulo = 'Noticia Tecnológica 🚀'
-          if not descripcion or descripcion == 'null': descripcion = '#tecnologia #ia #shorts'
-          if not script_text or script_text == 'null': script_text = 'Lo que acaba de pasar va a cambiar todo.'
-          
-          with open('titulo.txt', 'w', encoding='utf-8') as f: f.write(titulo[:100])
-          with open('descripcion.txt', 'w', encoding='utf-8') as f: f.write(descripcion[:5000])
-          with open('script.txt', 'w', encoding='utf-8') as f: f.write(script_text[:5000])
-          
-          print(f'✅ Extracción UTF-8 Completada')
+          with open('titulo.txt', 'w', encoding='utf-8') as f:
+              f.write(titulo.strip()[:85])
+              
+          with open('descripcion.txt', 'w', encoding='utf-8') as f:
+              f.write(descripcion.strip()[:4500])
+              
+          with open('script.txt', 'w', encoding='utf-8') as f:
+              f.write(script_text.strip()[:5000])
+              
+          print("✅ Textos extraídos correctamente sin corrupción")
           PYTHON_EXTRACT
+          
           python3 extraer_textos.py
 
       # ============================================
-      # 📥 PASO 3: DESCARGAR Y PREPARAR ASSETS
+      # 📥 PASO 3: PREPARAR ASSETS (AUDIO Y VÍDEO)
       # ============================================
       - name: Download and prepare assets
         timeout-minutes: 5
         run: |
           set +e
-          VIDEO_URL=$(echo "${{ github.event.client_payload.video_url }}" | tr -d '\r\n" ' | sed 's/^null$//i' | sed 's/^undefined$//i')
+          VIDEO_URL=$(cat $GITHUB_EVENT_PATH | jq -r '.client_payload.video_url // empty')
+          
           if [ -n "$VIDEO_URL" ]; then
             curl -L -f -A "Mozilla/5.0" --connect-timeout 20 -o pexels.mp4 "$VIDEO_URL" 2>/dev/null
           fi
 
           if [ ! -s "pexels.mp4" ]; then
-            ffmpeg -y -f lavfi -i "color=c=0x0a0e27:s=1080x1920:d=60:r=30" \
-              -vf "vignette=PI/2.5,noise=alls=4:allf=t,eq=brightness=-0.05:contrast=1.2" \
-              -c:v libx264 -preset ultrafast -crf 28 -t 60 pexels.mp4 2>/dev/null || true
+            ffmpeg -y -f lavfi -i "color=c=0x0a0e27:s=1080x1920:d=60:r=30" -vf "vignette=PI/2.5,noise=alls=4:allf=t,eq=brightness=-0.05:contrast=1.2" -c:v libx264 -preset ultrafast -crf 28 -t 60 pexels.mp4 2>/dev/null || true
           fi
 
-          # 🛡️ Validación Anti-Corrupción Audio (Recomendación Claude D)
           edge-tts --voice "es-ES-AlvaroNeural" --rate="+5%" --pitch="-3Hz" --file script.txt --write-media audio.mp3 2>/dev/null || true
-          
+
           if [ -s "audio.mp3" ]; then
-            AUDIO_SIZE=$(stat -c%s audio.mp3 2>/dev/null || stat -f%z audio.mp3 2>/dev/null || echo "0")
-            if [ "$AUDIO_SIZE" -lt 1000 ]; then
-              rm -f audio.mp3
-            fi
+            ffmpeg -y -i audio.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null || true
           fi
 
-          if [ ! -s "audio.mp3" ]; then
+          if [ ! -s "audio.wav" ]; then
             ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=mono -t 5 -c:a pcm_s16le audio.wav 2>/dev/null || true
-          else
-            ffmpeg -y -i audio.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null || true
           fi
 
           DURATION=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 audio.wav 2>/dev/null || echo "5")
@@ -131,35 +119,45 @@ jobs:
           echo "$DURATION" > dur.txt
 
       # ============================================
-      # 💬 PASO 4: GENERAR SUBTÍTULOS
+      # 💬 PASO 4: GENERAR SUBTÍTULOS (CON ESCUDOS DE CLAUDE)
       # ============================================
       - name: Generate subtitles
         timeout-minutes: 8
         run: |
           set +e
-          # 🛡️ Timeout para Whisper (Recomendación Claude A)
           timeout 7m whisper audio.wav --model small --language es --output_format json --word_timestamps True --output_dir . 2>/dev/null || true
 
           cat << 'PYEOF' > gen_subs.py
           import json, os
 
           def escape_ass(text):
-              """Escapa caracteres especiales para formato ASS (Recomendación Claude #2)"""
               return (text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\n", "\\N"))
 
           def generate():
               if not os.path.exists("audio.json"): return False
-              with open("audio.json", encoding="utf-8") as f: data = json.load(f)
+              
+              # 🛡️ Anti-corrupción JSON de Whisper
+              try:
+                  try:
+                      with open("audio.json", encoding="utf-8") as f: data = json.load(f)
+                  except UnicodeDecodeError:
+                      with open("audio.json", encoding="latin-1") as f: data = json.load(f)
+              except json.JSONDecodeError:
+                  return False
 
               words = []
               for seg in data.get("segments", []):
                   for w in seg.get("words", []):
-                      if w.get("word", "").strip(): words.append(w)
+                      word_text = w.get("word", "").strip()
+                      # Filtro de palabras basura (Claude)
+                      if word_text and len(word_text) > 1 and word_text.isalpha():
+                          words.append(w)
               if len(words) < 2: return False
 
               header = "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Montserrat Black,90,&H00FFFFFF,&H0000D7FF,&H00000000,&HBB000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,700,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
 
-              def fmt(s):
+              def fmt(s, offset=0.0):
+                  s = max(0, s + offset)
                   h, m, sec, cs = int(s//3600), int((s%3600)//60), int(s%60), min(int(round((s%1)*100)), 99)
                   return f"{h}:{m:02d}:{sec:02d}.{cs:02d}"
 
@@ -173,7 +171,8 @@ jobs:
                           clean = escape_ass(w["word"].strip().upper())
                           if k == j: parts.append("{\\c&H0000D7FF\\fscx115\\fscy115}" + clean + "{\\c&H00FFFFFF\\fscx100\\fscy100}")
                           else: parts.append(clean)
-                      lines.append(f"Dialogue: 0,{fmt(cw['start'])},{fmt(cw['end'])},Default,,0,0,0,,{' '.join(parts)}")
+                      # 🛡️ Ajuste de Sincronización (-0.15s / +0.15s) de Claude
+                      lines.append(f"Dialogue: 0,{fmt(cw['start'], -0.15)},{fmt(cw['end'], 0.15)},Default,,0,0,0,,{' '.join(parts)}")
 
               with open("subtitles.ass", "w", encoding="utf-8") as f:
                   f.write(header + "\n".join(lines) + "\n")
@@ -197,7 +196,10 @@ jobs:
           DUR=$(cat dur.txt)
           SAFE_DUR=$(printf '%.2f' "$DUR")
 
-          # 🛡️ FFmpeg Forzar Fuente (Recomendación Claude #3)
+          # 🛡️ Forzar BOM UTF-8 en subtítulos antes de FFmpeg (Sugerencia Claude)
+          file -bi subtitles.ass | grep -q "utf-8" || iconv -f ISO-8859-1 -t UTF-8 subtitles.ass > subtitles_tmp.ass && mv subtitles_tmp.ass subtitles.ass
+          printf '\xef\xbb\xbf' > subtitles_bom.ass && cat subtitles.ass >> subtitles_bom.ass && mv subtitles_bom.ass subtitles.ass
+
           ffmpeg -y -stream_loop -1 -i pexels.mp4 -i audio.wav \
             -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,eq=brightness=-0.08:saturation=1.1[bg];[bg]subtitles=subtitles.ass:force_style='FontName=Montserrat Black'[subs];[subs]drawbox=x=0:y=0:w='min(iw\,iw*t/${SAFE_DUR})':h=10:color=0xFFD700@0.9:t=fill[final]" \
             -map "[final]" -map 1:a -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -c:a aac -b:a 192k -t "$DUR" output.mp4 2>/dev/null || true
@@ -205,7 +207,11 @@ jobs:
           if [ ! -s "output.mp4" ]; then
             ffmpeg -y -f lavfi -i "color=c=0x0a0e27:s=1080x1920:d=${DUR}:r=30" -i audio.wav -c:v libx264 -preset ultrafast -t "$DUR" output.mp4 2>/dev/null || true
           fi
-          [ ! -s "output.mp4" ] && exit 1 || echo "✅ Render OK"
+          
+          if [ ! -s "output.mp4" ]; then
+            echo "❌ ERROR CRÍTICO: No se pudo generar el video"
+            exit 1
+          fi
 
       # ============================================
       # 📺 PASO 6: PUBLICAR EN YOUTUBE
@@ -235,19 +241,20 @@ jobs:
               token_data = {'token': 'dummy', 'refresh_token': refresh_token, 'token_uri': 'https://oauth2.googleapis.com/token', 'client_id': client_id, 'client_secret': client_secret, 'scopes': ['https://www.googleapis.com/auth/youtube.upload']}
               creds = Credentials.from_authorized_user_info(token_data, token_data['scopes'])
               
-              # 🛡️ Try/Catch en Refresh (Recomendación Claude C)
               try:
                   if creds and creds.expired and creds.refresh_token: creds.refresh(Request())
               except Exception as e:
                   print("❌ Error de Token YT"); sys.exit(1)
                   
               youtube = build('youtube', 'v3', credentials=creds)
-              titulo = open('titulo.txt', encoding='utf-8').read().strip()
-              descripcion = open('descripcion.txt', encoding='utf-8').read().strip()
+              
+              # 🛡️ Lectura a prueba de errores de acentos
+              titulo = open('titulo.txt', encoding='utf-8', errors='replace').read().strip()
+              descripcion = open('descripcion.txt', encoding='utf-8', errors='replace').read().strip()
               
               req = youtube.videos().insert(
                   part='snippet,status',
-                  body={'snippet': {'categoryId': '28', 'title': titulo, 'description': descripcion, 'tags': ['tecnologia', 'shorts']}, 'status': {'privacyStatus': 'public'}},
+                  body={'snippet': {'categoryId': '28', 'title': titulo, 'description': descripcion, 'tags': ['tecnologia', 'shorts', 'ia', 'noticias']}, 'status': {'privacyStatus': 'public'}},
                   media_body=MediaFileUpload('output.mp4', resumable=True)
               ).execute()
               
@@ -287,7 +294,11 @@ jobs:
                   subprocess.run(["gh", "secret", "set", "TIKTOK_ACCESS_TOKEN", "-b", access_token], check=False)
               except: return False
 
-              caption = f"{open('titulo.txt', encoding='utf-8').read().strip()}\n{open('descripcion.txt', encoding='utf-8').read().strip()}"[:150]
+              # 🛡️ Lectura a prueba de errores
+              t = open('titulo.txt', encoding='utf-8', errors='replace').read().strip()
+              d = open('descripcion.txt', encoding='utf-8', errors='replace').read().strip()
+              caption = f"{t}\n{d}"[:150]
+              
               size = os.path.getsize("output.mp4")
               
               init = requests.post("https://open.tiktokapis.com/v2/post/publish/video/init/", headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json; charset=UTF-8"}, json={"post_info": {"title": caption, "privacy_level": "PUBLIC_TO_EVERYONE"}, "source_info": {"source": "FILE_UPLOAD", "video_size": size, "chunk_size": size, "total_chunk_count": 1}}, timeout=60).json()
@@ -331,7 +342,11 @@ jobs:
               
               if not url: return False
               
-              caption = f"{open('titulo.txt', encoding='utf-8').read().strip()}\n{open('descripcion.txt', encoding='utf-8').read().strip()}"[:2200]
+              # 🛡️ Lectura a prueba de errores
+              t = open('titulo.txt', encoding='utf-8', errors='replace').read().strip()
+              d = open('descripcion.txt', encoding='utf-8', errors='replace').read().strip()
+              caption = f"{t}\n{d}"[:2200]
+              
               base = f"https://graph.instagram.com/v21.0/{uid}"
               
               r = requests.post(f"{base}/media", data={'media_type':'REELS', 'video_url':url, 'caption':caption, 'access_token':token}, timeout=120).json()
@@ -362,7 +377,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          TITULO=$(cat titulo.txt 2>/dev/null || echo "Sin título")
+          TITULO=$(python3 -c "print(open('titulo.txt', encoding='utf-8', errors='replace').read().strip()[:50])" 2>/dev/null || echo "Sin título")
           TITULO_CLEAN=$(echo "$TITULO" | sed 's/[_*[\]()~`>#+=|{}.!-]//g')
           
           YT_STATUS="${{ steps.youtube.outputs.youtube_status || '⚠️ No ejecutado' }}"
