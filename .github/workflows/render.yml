@@ -2,6 +2,10 @@ name: Dato Critico - Produccion y Distribucion
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # 🛡️ ESCUDO GLOBAL UTF-8 (Recomendación Claude #5)
+  PYTHONIOENCODING: utf-8
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
 
 on:
   repository_dispatch:
@@ -56,167 +60,135 @@ jobs:
           echo "✅ Setup completado correctamente"
 
       # ============================================
-      # 📥 PASO 2: DESCARGAR Y PREPARAR ASSETS
+      # 📝 PASO 2: EXTRAER METADATOS (UTF-8 SAFE)
+      # ============================================
+      - name: Extraer Textos
+        timeout-minutes: 2
+        env:
+          TITULO_RAW: ${{ github.event.client_payload.titulo }}
+          DESCRIPCION_RAW: ${{ github.event.client_payload.descripcion }}
+          SCRIPT_RAW: ${{ github.event.client_payload.script_text }}
+        run: |
+          cat << 'PYTHON_EXTRACT' > extraer_textos.py
+          import os, sys
+          
+          # Forzar UTF-8 (Recomendación Claude #1)
+          sys.stdout.reconfigure(encoding='utf-8')
+          sys.stderr.reconfigure(encoding='utf-8')
+          
+          titulo = os.environ.get('TITULO_RAW', '').strip()
+          descripcion = os.environ.get('DESCRIPCION_RAW', '').strip()
+          script_text = os.environ.get('SCRIPT_RAW', '').strip()
+          
+          if not titulo or titulo == 'null': titulo = 'Noticia Tecnológica 🚀'
+          if not descripcion or descripcion == 'null': descripcion = '#tecnologia #ia #shorts'
+          if not script_text or script_text == 'null': script_text = 'Lo que acaba de pasar va a cambiar todo.'
+          
+          with open('titulo.txt', 'w', encoding='utf-8') as f: f.write(titulo[:100])
+          with open('descripcion.txt', 'w', encoding='utf-8') as f: f.write(descripcion[:5000])
+          with open('script.txt', 'w', encoding='utf-8') as f: f.write(script_text[:5000])
+          
+          print(f'✅ Extracción UTF-8 Completada')
+          PYTHON_EXTRACT
+          python3 extraer_textos.py
+
+      # ============================================
+      # 📥 PASO 3: DESCARGAR Y PREPARAR ASSETS
       # ============================================
       - name: Download and prepare assets
         timeout-minutes: 5
         run: |
           set +e
-          
           VIDEO_URL=$(echo "${{ github.event.client_payload.video_url }}" | tr -d '\r\n" ' | sed 's/^null$//i' | sed 's/^undefined$//i')
           if [ -n "$VIDEO_URL" ]; then
-            echo "📥 Descargando video Pexels..."
-            curl -L -f -A "Mozilla/5.0" --connect-timeout 20 --max-time 120 -o pexels.mp4 "$VIDEO_URL" 2>/dev/null
-          fi
-
-          if [ -s "pexels.mp4" ]; then
-            mime=$(file -b --mime-type pexels.mp4 2>/dev/null)
-            if ! echo "$mime" | grep -q "video"; then
-              echo "⚠️ Archivo no es video, eliminando..."
-              rm -f pexels.mp4
-            else
-              echo "✅ Video Pexels descargado: $(du -h pexels.mp4 | cut -f1)"
-            fi
+            curl -L -f -A "Mozilla/5.0" --connect-timeout 20 -o pexels.mp4 "$VIDEO_URL" 2>/dev/null
           fi
 
           if [ ! -s "pexels.mp4" ]; then
-            echo "🎨 Generando fondo oscuro animado..."
             ffmpeg -y -f lavfi -i "color=c=0x0a0e27:s=1080x1920:d=60:r=30" \
               -vf "vignette=PI/2.5,noise=alls=4:allf=t,eq=brightness=-0.05:contrast=1.2" \
-              -c:v libx264 -preset ultrafast -crf 28 -pix_fmt yuv420p -t 60 pexels.mp4 \
-              2>&1 | grep -v "deprecated" || true
+              -c:v libx264 -preset ultrafast -crf 28 -t 60 pexels.mp4 2>/dev/null || true
           fi
 
-          TEXTO="${{ github.event.client_payload.script_text }}"
-          [ -z "$TEXTO" ] && TEXTO="Lo que acaba de pasar en tecnologia va a cambiar todo."
-          echo "$TEXTO" | head -c 5000 > script.txt
-          echo "📝 Script: $(wc -w < script.txt) palabras"
-
-          echo "🎙️ Sintetizando voz..."
-          edge-tts \
-            --voice "es-ES-AlvaroNeural" \
-            --rate="+5%" \
-            --pitch="-3Hz" \
-            --file script.txt \
-            --write-media audio.mp3 2>/dev/null || true
-
+          # 🛡️ Validación Anti-Corrupción Audio (Recomendación Claude D)
+          edge-tts --voice "es-ES-AlvaroNeural" --rate="+5%" --pitch="-3Hz" --file script.txt --write-media audio.mp3 2>/dev/null || true
+          
           if [ -s "audio.mp3" ]; then
-            ffmpeg -y -i audio.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio.wav \
-              2>&1 | grep -v "deprecated" || true
-            echo "✅ Audio generado: $(du -h audio.mp3 | cut -f1)"
+            AUDIO_SIZE=$(stat -c%s audio.mp3 2>/dev/null || stat -f%z audio.mp3 2>/dev/null || echo "0")
+            if [ "$AUDIO_SIZE" -lt 1000 ]; then
+              rm -f audio.mp3
+            fi
           fi
 
-          if [ ! -s "audio.wav" ]; then
-            echo "⚠️ Generando audio de emergencia..."
-            ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=mono -t 5 -c:a pcm_s16le audio.wav \
-              2>&1 | grep -v "deprecated" || true
+          if [ ! -s "audio.mp3" ]; then
+            ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=mono -t 5 -c:a pcm_s16le audio.wav 2>/dev/null || true
+          else
+            ffmpeg -y -i audio.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null || true
           fi
 
-          DURATION=$(ffprobe -v quiet -show_entries format=duration \
-            -of default=noprint_wrappers=1:nokey=1 audio.wav 2>/dev/null || echo "5")
+          DURATION=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 audio.wav 2>/dev/null || echo "5")
           [ -z "$DURATION" ] || [ "$DURATION" = "N/A" ] && DURATION="5"
           echo "$DURATION" > dur.txt
-          echo "⏱️ Duración total: ${DURATION}s"
 
       # ============================================
-      # 💬 PASO 3: GENERAR SUBTÍTULOS
+      # 💬 PASO 4: GENERAR SUBTÍTULOS
       # ============================================
       - name: Generate subtitles
         timeout-minutes: 8
         run: |
           set +e
-          echo "📝 Transcribiendo con Whisper..."
-          
-          whisper audio.wav \
-            --model small \
-            --language es \
-            --output_format json \
-            --word_timestamps True \
-            --output_dir . 2>/dev/null || true
+          # 🛡️ Timeout para Whisper (Recomendación Claude A)
+          timeout 7m whisper audio.wav --model small --language es --output_format json --word_timestamps True --output_dir . 2>/dev/null || true
 
           cat << 'PYEOF' > gen_subs.py
           import json, os
 
-          def generate():
-              if not os.path.exists("audio.json"):
-                  return False
+          def escape_ass(text):
+              """Escapa caracteres especiales para formato ASS (Recomendación Claude #2)"""
+              return (text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\n", "\\N"))
 
-              with open("audio.json") as f:
-                  data = json.load(f)
+          def generate():
+              if not os.path.exists("audio.json"): return False
+              with open("audio.json", encoding="utf-8") as f: data = json.load(f)
 
               words = []
               for seg in data.get("segments", []):
                   for w in seg.get("words", []):
-                      if w.get("word", "").strip():
-                          words.append(w)
+                      if w.get("word", "").strip(): words.append(w)
+              if len(words) < 2: return False
 
-              if len(words) < 2:
-                  return False
-
-              header = "[Script Info]\n"
-              header += "ScriptType: v4.00+\n"
-              header += "PlayResX: 1080\n"
-              header += "PlayResY: 1920\n\n"
-              header += "[V4+ Styles]\n"
-              header += "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-              header += "Style: Default,Montserrat Black,90,&H00FFFFFF,&H0000D7FF,&H00000000,&HBB000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,700,1\n\n"
-              header += "[Events]\n"
-              header += "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+              header = "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Montserrat Black,90,&H00FFFFFF,&H0000D7FF,&H00000000,&HBB000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,700,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
 
               def fmt(s):
-                  h = int(s // 3600)
-                  m = int((s % 3600) // 60)
-                  sec = int(s % 60)
-                  cs = min(int(round((s % 1) * 100)), 99)
+                  h, m, sec, cs = int(s//3600), int((s%3600)//60), int(s%60), min(int(round((s%1)*100)), 99)
                   return f"{h}:{m:02d}:{sec:02d}.{cs:02d}"
 
               lines = []
               for i in range(0, len(words), 3):
-                  chunk = words[i:i + 3]
-                  if not chunk:
-                      continue
+                  chunk = words[i:i+3]
+                  if not chunk: continue
                   for j, cw in enumerate(chunk):
                       parts = []
                       for k, w in enumerate(chunk):
-                          clean = w["word"].strip().upper().replace("{", "").replace("}", "")
-                          if k == j:
-                              parts.append("{\\c&H0000D7FF\\fscx115\\fscy115}" + clean + "{\\c&H00FFFFFF\\fscx100\\fscy100}")
-                          else:
-                              parts.append(clean)
+                          clean = escape_ass(w["word"].strip().upper())
+                          if k == j: parts.append("{\\c&H0000D7FF\\fscx115\\fscy115}" + clean + "{\\c&H00FFFFFF\\fscx100\\fscy100}")
+                          else: parts.append(clean)
                       lines.append(f"Dialogue: 0,{fmt(cw['start'])},{fmt(cw['end'])},Default,,0,0,0,,{' '.join(parts)}")
 
-              with open("subtitles.ass", "w") as f:
-                  f.write(header)
-                  for line in lines:
-                      f.write(line + "\n")
-
-              print(f"✅ {len(lines)} líneas de subtítulos generadas")
+              with open("subtitles.ass", "w", encoding="utf-8") as f:
+                  f.write(header + "\n".join(lines) + "\n")
               return True
 
           try:
-              if not generate():
-                  raise Exception("sin datos suficientes")
-          except Exception as e:
-              print(f"⚠️ Fallback: {e}")
-              fallback = "[Script Info]\n"
-              fallback += "ScriptType: v4.00+\n"
-              fallback += "PlayResX: 1080\n"
-              fallback += "PlayResY: 1920\n\n"
-              fallback += "[V4+ Styles]\n"
-              fallback += "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-              fallback += "Style: Default,Montserrat,80,&H00FFFFFF,&H0000D7FF,&H00000000,&HBB000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,700,1\n\n"
-              fallback += "[Events]\n"
-              fallback += "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
-              fallback += "Dialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,\n"
-              with open("subtitles.ass", "w") as f:
-                  f.write(fallback)
-              print("✅ Subtítulos fallback generados")
+              if not generate(): raise Exception("Fallback")
+          except:
+              fallback = "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Montserrat,80,&H00FFFFFF,&H0000D7FF,&H00000000,&HBB000000,-1,0,0,0,100,100,0,0,1,4,2,2,60,60,700,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:00.00,0:00:05.00,Default,,0,0,0,,\n"
+              with open("subtitles.ass", "w", encoding="utf-8") as f: f.write(fallback)
           PYEOF
-
-          python3 gen_subs.py || true
+          python3 gen_subs.py
 
       # ============================================
-      # 🎬 PASO 4: RENDERIZAR VIDEO FINAL
+      # 🎬 PASO 5: RENDERIZAR VIDEO FINAL
       # ============================================
       - name: Render final video
         timeout-minutes: 10
@@ -225,100 +197,15 @@ jobs:
           DUR=$(cat dur.txt)
           SAFE_DUR=$(printf '%.2f' "$DUR")
 
-          echo "🎬 Renderizando video final (${SAFE_DUR}s)..."
+          # 🛡️ FFmpeg Forzar Fuente (Recomendación Claude #3)
+          ffmpeg -y -stream_loop -1 -i pexels.mp4 -i audio.wav \
+            -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,eq=brightness=-0.08:saturation=1.1[bg];[bg]subtitles=subtitles.ass:force_style='FontName=Montserrat Black'[subs];[subs]drawbox=x=0:y=0:w='min(iw\,iw*t/${SAFE_DUR})':h=10:color=0xFFD700@0.9:t=fill[final]" \
+            -map "[final]" -map 1:a -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -c:a aac -b:a 192k -t "$DUR" output.mp4 2>/dev/null || true
 
-          ffmpeg -y \
-            -stream_loop -1 -i pexels.mp4 \
-            -i audio.wav \
-            -filter_complex "\
-              [0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,eq=brightness=-0.08:saturation=1.1[bg]; \
-              [bg]ass=subtitles.ass[subs]; \
-              [subs]drawbox=x=0:y=0:w='min(iw\,iw*t/${SAFE_DUR})':h=10:color=0xFFD700@0.9:t=fill[final]" \
-            -map "[final]" \
-            -map 1:a \
-            -c:v libx264 -preset medium -crf 20 -pix_fmt yuv420p \
-            -c:a aac -b:a 192k -ar 44100 \
-            -movflags +faststart \
-            -t "$DUR" \
-            output.mp4 2>/tmp/render.log
-
-          if [ $? -eq 0 ] && [ -s "output.mp4" ]; then
-            echo "✅ Render completo exitoso"
-          else
-            echo "⚠️ Render 1 falló, intentando render simplificado..."
-            
-            ffmpeg -y \
-              -stream_loop -1 -i pexels.mp4 \
-              -i audio.wav \
-              -filter_complex "\
-                [0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[bg]; \
-                [bg]ass=subtitles.ass[final]" \
-              -map "[final]" \
-              -map 1:a \
-              -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p \
-              -c:a aac -b:a 192k \
-              -t "$DUR" \
-              output.mp4 2>/dev/null
-
-            if [ ! -s "output.mp4" ]; then
-              echo "⚠️ Render 2 falló, modo emergencia..."
-              
-              ffmpeg -y \
-                -f lavfi -i "color=c=0x0a0e27:s=1080x1920:d=${DUR}:r=30" \
-                -i audio.wav \
-                -c:v libx264 -preset ultrafast -crf 28 -pix_fmt yuv420p \
-                -c:a aac -b:a 128k \
-                -t "$DUR" -shortest \
-                output.mp4 2>/dev/null || true
-            fi
+          if [ ! -s "output.mp4" ]; then
+            ffmpeg -y -f lavfi -i "color=c=0x0a0e27:s=1080x1920:d=${DUR}:r=30" -i audio.wav -c:v libx264 -preset ultrafast -t "$DUR" output.mp4 2>/dev/null || true
           fi
-
-          if [ -s "output.mp4" ]; then
-            SIZE=$(du -h output.mp4 | cut -f1)
-            echo "✅ Video final generado: $SIZE"
-          else
-            echo "❌ ERROR CRÍTICO: No se pudo generar el video"
-            exit 1
-          fi
-
-      # ============================================
-      # 📝 PASO 5: EXTRAER METADATOS (UTF-8 SAFE)
-      # ============================================
-      - name: Extraer Textos
-        timeout-minutes: 2
-        env:
-          PAYLOAD_TITULO: ${{ github.event.client_payload.titulo }}
-          PAYLOAD_DESCRIPCION: ${{ github.event.client_payload.descripcion }}
-        run: |
-          cat << 'PYTHON_EXTRACT' > extraer_textos.py
-          import os
-
-          # Leer variables limpias del entorno
-          titulo_raw = os.environ.get("PAYLOAD_TITULO", "")
-          descripcion_raw = os.environ.get("PAYLOAD_DESCRIPCION", "")
-
-          # Fallbacks por si vienen vacíos
-          if not titulo_raw or titulo_raw == "null":
-              titulo_raw = "Noticia Tecnológica Impactante 🚀"
-          if not descripcion_raw or descripcion_raw == "null":
-              descripcion_raw = "#tecnologia #ia #shorts #noticias"
-
-          # Limpiar y truncar CORRECTAMENTE en UTF-8 contando caracteres reales
-          titulo = titulo_raw.strip()[:85]
-          descripcion = descripcion_raw.strip()[:4500]
-
-          # Escribir a disco en UTF-8 puro
-          with open("titulo.txt", "w", encoding="utf-8") as f:
-              f.write(titulo)
-
-          with open("descripcion.txt", "w", encoding="utf-8") as f:
-              f.write(descripcion)
-
-          print(f"✅ Título limpio: {titulo}")
-          print(f"✅ Descripción limpia: {descripcion[:100]}...")
-          PYTHON_EXTRACT
-          
-          python3 extraer_textos.py
+          [ ! -s "output.mp4" ] && exit 1 || echo "✅ Render OK"
 
       # ============================================
       # 📺 PASO 6: PUBLICAR EN YOUTUBE
@@ -331,107 +218,45 @@ jobs:
           YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
           YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
-          YOUTUBE_ACCESS_TOKEN: ${{ secrets.YOUTUBE_ACCESS_TOKEN }}
         run: |
-          echo "🔍 Verificando credenciales de YouTube..."
-          if [ -z "$YOUTUBE_CLIENT_ID" ] || [ -z "$YOUTUBE_CLIENT_SECRET" ] || [ -z "$YOUTUBE_REFRESH_TOKEN" ]; then
-            echo "❌ ERROR: Faltan secrets de YouTube"
-            exit 1
-          fi
-          
-          echo "✅ Secrets encontrados correctamente"
-          
           cat << 'PYTHON_YT' > publicar_youtube.py
-          import os
-          import sys
+          import os, sys
           from google.auth.transport.requests import Request
           from google.oauth2.credentials import Credentials
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaFileUpload
 
-          SCOPES = ['https://www.googleapis.com/auth/youtube.upload']
-
-          def upload_video():
+          def upload():
               client_id = os.environ.get('YOUTUBE_CLIENT_ID')
               client_secret = os.environ.get('YOUTUBE_CLIENT_SECRET')
               refresh_token = os.environ.get('YOUTUBE_REFRESH_TOKEN')
-              access_token = os.environ.get('YOUTUBE_ACCESS_TOKEN', 'dummy')
+              if not all([client_id, client_secret, refresh_token]): sys.exit(1)
               
-              if not all([client_id, client_secret, refresh_token]):
-                  print("❌ ERROR: Credenciales incompletas")
-                  sys.exit(1)
+              token_data = {'token': 'dummy', 'refresh_token': refresh_token, 'token_uri': 'https://oauth2.googleapis.com/token', 'client_id': client_id, 'client_secret': client_secret, 'scopes': ['https://www.googleapis.com/auth/youtube.upload']}
+              creds = Credentials.from_authorized_user_info(token_data, token_data['scopes'])
               
-              token_data = {
-                  'token': access_token,
-                  'refresh_token': refresh_token,
-                  'token_uri': 'https://oauth2.googleapis.com/token',
-                  'client_id': client_id,
-                  'client_secret': client_secret,
-                  'scopes': SCOPES
-              }
-              
-              creds = Credentials.from_authorized_user_info(token_data, SCOPES)
-              
-              if creds and creds.expired and creds.refresh_token:
-                  print("🔄 Refrescando token...")
-                  creds.refresh(Request())
-              
+              # 🛡️ Try/Catch en Refresh (Recomendación Claude C)
+              try:
+                  if creds and creds.expired and creds.refresh_token: creds.refresh(Request())
+              except Exception as e:
+                  print("❌ Error de Token YT"); sys.exit(1)
+                  
               youtube = build('youtube', 'v3', credentials=creds)
+              titulo = open('titulo.txt', encoding='utf-8').read().strip()
+              descripcion = open('descripcion.txt', encoding='utf-8').read().strip()
               
-              titulo = open('titulo.txt', 'r', encoding='utf-8').read().strip()
-              descripcion = open('descripcion.txt', 'r', encoding='utf-8').read().strip()
-              
-              print(f"📹 Subiendo: {titulo}")
-              
-              request_body = {
-                  'snippet': {
-                      'categoryId': '28',
-                      'title': titulo,
-                      'description': descripcion,
-                      'tags': ['tecnologia', 'shorts', 'ia', 'noticias'],
-                      'defaultLanguage': 'es',
-                      'defaultAudioLanguage': 'es'
-                  },
-                  'status': {
-                      'privacyStatus': 'public',
-                      'selfDeclaredMadeForKids': False
-                  }
-              }
-              
-              media = MediaFileUpload('output.mp4', chunksize=-1, resumable=True)
-              
-              request = youtube.videos().insert(
+              req = youtube.videos().insert(
                   part='snippet,status',
-                  body=request_body,
-                  media_body=media
-              )
+                  body={'snippet': {'categoryId': '28', 'title': titulo, 'description': descripcion, 'tags': ['tecnologia', 'shorts']}, 'status': {'privacyStatus': 'public'}},
+                  media_body=MediaFileUpload('output.mp4', resumable=True)
+              ).execute()
               
-              response = request.execute()
-              video_id = response['id']
-              
-              print(f"✅ Video publicado: https://youtube.com/shorts/{video_id}")
-              with open('youtube_id.txt', 'w') as f:
-                  f.write(video_id)
-              
-              return True
-
-          try:
-              upload_video()
-              sys.exit(0)
-          except Exception as e:
-              print(f"❌ Error: {e}")
-              import traceback
-              traceback.print_exc()
-              sys.exit(1)
+              open('youtube_id.txt', 'w').write(req['id'])
+          
+          try: upload()
+          except Exception: sys.exit(1)
           PYTHON_YT
-          
-          python3 publicar_youtube.py
-          
-          if [ $? -eq 0 ] && [ -f youtube_id.txt ]; then
-            echo "youtube_status=✅ OK" >> $GITHUB_OUTPUT
-          else
-            echo "youtube_status=❌ Fallo" >> $GITHUB_OUTPUT
-          fi
+          python3 publicar_youtube.py && echo "youtube_status=✅ OK" >> $GITHUB_OUTPUT || echo "youtube_status=❌ Fallo" >> $GITHUB_OUTPUT
 
       # ============================================
       # 🎵 PASO 7: PUBLICAR EN TIKTOK
@@ -445,149 +270,39 @@ jobs:
           TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
           TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
           TIKTOK_REFRESH_TOKEN: ${{ secrets.TIKTOK_REFRESH_TOKEN }}
-          TIKTOK_ACCESS_TOKEN: ${{ secrets.TIKTOK_ACCESS_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
-          echo "🔍 Verificando credenciales de TikTok..."
-          
           cat << 'PYTHON_TK' > publicar_tk.py
-          import os
-          import sys
-          import requests
-          import subprocess
-
-          def renovar_token():
+          import os, sys, requests, subprocess
+          def upload():
               client_key = os.environ.get("TIKTOK_CLIENT_KEY")
               client_secret = os.environ.get("TIKTOK_CLIENT_SECRET")
               refresh_token = os.environ.get("TIKTOK_REFRESH_TOKEN")
-              access_token = os.environ.get("TIKTOK_ACCESS_TOKEN")
-              
-              if not all([client_key, client_secret, refresh_token]):
-                  print("⚠️ Configuración de renovación incompleta")
-                  return access_token
+              if not all([client_key, client_secret, refresh_token]): return False
               
               try:
-                  print("🔄 Renovando token de TikTok...")
-                  url = "https://open.tiktokapis.com/v2/oauth/token/"
-                  headers = {"Content-Type": "application/x-www-form-urlencoded"}
-                  data = {
-                      "client_key": client_key,
-                      "client_secret": client_secret,
-                      "grant_type": "refresh_token",
-                      "refresh_token": refresh_token
-                  }
-                  
-                  response = requests.post(url, headers=headers, data=data, timeout=30)
-                  result = response.json()
-                  
-                  if "data" in result and "access_token" in result["data"]:
-                      new_token = result["data"]["access_token"]
-                      new_refresh = result["data"].get("refresh_token", refresh_token)
-                      
-                      print("✅ Token renovado")
-                      
-                      subprocess.run(["gh", "secret", "set", "TIKTOK_ACCESS_TOKEN", "-b", new_token], check=False)
-                      subprocess.run(["gh", "secret", "set", "TIKTOK_REFRESH_TOKEN", "-b", new_refresh], check=False)
-                      
-                      return new_token
-                  else:
-                      return access_token
-              except Exception as e:
-                  print(f"⚠️ Error renovando: {e}")
-                  return access_token
+                  res = requests.post("https://open.tiktokapis.com/v2/oauth/token/", data={"client_key": client_key, "client_secret": client_secret, "grant_type": "refresh_token", "refresh_token": refresh_token}, timeout=30).json()
+                  access_token = res.get("data", {}).get("access_token")
+                  if not access_token: return False
+                  subprocess.run(["gh", "secret", "set", "TIKTOK_ACCESS_TOKEN", "-b", access_token], check=False)
+              except: return False
 
-          def publicar_tiktok():
-              access_token = renovar_token()
+              caption = f"{open('titulo.txt', encoding='utf-8').read().strip()}\n{open('descripcion.txt', encoding='utf-8').read().strip()}"[:150]
+              size = os.path.getsize("output.mp4")
               
-              if not access_token:
-                  print("❌ No hay token de acceso")
-                  return False
+              init = requests.post("https://open.tiktokapis.com/v2/post/publish/video/init/", headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json; charset=UTF-8"}, json={"post_info": {"title": caption, "privacy_level": "PUBLIC_TO_EVERYONE"}, "source_info": {"source": "FILE_UPLOAD", "video_size": size, "chunk_size": size, "total_chunk_count": 1}}, timeout=60).json()
+              if "data" not in init: return False
               
-              titulo = open("titulo.txt", "r", encoding="utf-8").read().strip()
-              descripcion = open("descripcion.txt", "r", encoding="utf-8").read().strip()
-              caption = f"{titulo}\n\n{descripcion}"[:150]
+              upload_url = init["data"]["upload_url"]
+              up = requests.put(upload_url, headers={"Content-Type": "video/mp4", "Content-Length": str(size)}, data=open("output.mp4", "rb").read(), timeout=300)
+              return up.status_code in [200, 201]
               
-              video_size = os.path.getsize("output.mp4")
-              
-              headers = {
-                  "Authorization": f"Bearer {access_token}",
-                  "Content-Type": "application/json; charset=UTF-8"
-              }
-              
-              print("📤 Iniciando subida a TikTok...")
-              init_payload = {
-                  "post_info": {
-                      "title": caption,
-                      "privacy_level": "PUBLIC_TO_EVERYONE",
-                      "disable_duet": False,
-                      "disable_comment": False,
-                      "disable_stitch": False
-                  },
-                  "source_info": {
-                      "source": "FILE_UPLOAD",
-                      "video_size": video_size,
-                      "chunk_size": video_size,
-                      "total_chunk_count": 1
-                  }
-              }
-              
-              try:
-                  init_response = requests.post(
-                      "https://open.tiktokapis.com/v2/post/publish/video/init/",
-                      headers=headers,
-                      json=init_payload,
-                      timeout=60
-                  )
-                  init_data = init_response.json()
-                  
-                  if "data" not in init_data:
-                      print(f"❌ Error en init: {init_data}")
-                      return False
-                  
-                  upload_url = init_data["data"]["upload_url"]
-                  
-                  print("📤 Subiendo video...")
-                  with open("output.mp4", "rb") as f:
-                      video_data = f.read()
-                  
-                  upload_headers = {
-                      "Content-Type": "video/mp4",
-                      "Content-Length": str(video_size)
-                  }
-                  
-                  upload_response = requests.put(
-                      upload_url,
-                      headers=upload_headers,
-                      data=video_data,
-                      timeout=300
-                  )
-                  
-                  if upload_response.status_code not in [200, 201]:
-                      print(f"❌ Error subiendo: {upload_response.status_code}")
-                      return False
-                  
-                  print("✅ Video subido a TikTok")
-                  return True
-                  
-              except Exception as e:
-                  print(f"❌ Error: {e}")
-                  return False
-
-          if __name__ == "__main__":
-              success = publicar_tiktok()
-              sys.exit(0 if success else 1)
+          sys.exit(0 if upload() else 1)
           PYTHON_TK
-          
-          python3 publicar_tk.py
-          
-          if [ $? -eq 0 ]; then
-            echo "tiktok_status=✅ OK" >> $GITHUB_OUTPUT
-          else
-            echo "tiktok_status=❌ Fallo" >> $GITHUB_OUTPUT
-          fi
+          python3 publicar_tk.py && echo "tiktok_status=✅ OK" >> $GITHUB_OUTPUT || echo "tiktok_status=❌ Fallo" >> $GITHUB_OUTPUT
 
       # ============================================
-      # 📷 PASO 8: INSTAGRAM (SISTEMA REDUNDANTE V2)
+      # 📷 PASO 8: INSTAGRAM
       # ============================================
       - name: Publicar en Instagram
         id: instagram
@@ -599,148 +314,43 @@ jobs:
         run: |
           cat << 'PYTHON_IG' > publicar_ig.py
           import os, sys, requests, time
-          from requests.adapters import HTTPAdapter
-          from requests.packages.urllib3.util.retry import Retry
-
-          def crear_sesion():
-              session = requests.Session()
-              retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
-              adapter = HTTPAdapter(max_retries=retry)
-              session.mount('http://', adapter)
-              session.mount('https://', adapter)
-              return session
-
-          def subir_video_multi():
-              print("📤 Iniciando subida con redundancia automática...")
-              session = crear_sesion()
+          def upload():
+              token = os.environ.get("INSTAGRAM_ACCESS_TOKEN")
+              uid = os.environ.get("INSTAGRAM_USER_ID")
+              if not token or not uid: return False
               
-              servicios = [
-                  {
-                      'nombre': 'Litterbox',
-                      'url': 'https://litterbox.catbox.moe/resources/internals/api.php',
-                      'data': {'reqtype': 'fileupload', 'time': '12h'},
-                      'file_key': 'fileToUpload',
-                      'extrae_url': lambda r: r.text.strip() if r.text.startswith('http') else None
-                  },
-                  {
-                      'nombre': 'tmpfiles.org',
-                      'url': 'https://tmpfiles.org/api/v1/upload',
-                      'data': None,
-                      'file_key': 'file',
-                      'extrae_url': lambda r: r.json()['data']['url'].replace('tmpfiles.org/', 'tmpfiles.org/dl/') if 'data' in r.json() else None
-                  },
-                  {
-                      'nombre': '0x0.st',
-                      'url': 'https://0x0.st',
-                      'data': None,
-                      'file_key': 'file',
-                      'extrae_url': lambda r: r.text.strip() if r.text.startswith('http') else None
-                  }
-              ]
-
-              for srv in servicios:
-                  print(f"   ▶️ Intentando servidor: {srv['nombre']}...")
+              url = None
+              for srv in [{'u':'https://litterbox.catbox.moe/resources/internals/api.php', 'd':{'reqtype':'fileupload','time':'12h'}, 'f':'fileToUpload'}, {'u':'https://tmpfiles.org/api/v1/upload', 'd':None, 'f':'file'}]:
                   try:
-                      with open('output.mp4', 'rb') as f:
-                          if srv['data']:
-                              r = session.post(srv['url'], data=srv['data'], files={srv['file_key']: f}, timeout=120)
-                          else:
-                              r = session.post(srv['url'], files={srv['file_key']: f}, timeout=120)
-
+                      r = requests.post(srv['u'], data=srv['d'], files={srv['f']: open('output.mp4', 'rb')}, timeout=120)
                       if r.status_code == 200:
-                          url = srv['extrae_url'](r)
-                          if url:
-                              print(f"   ✅ ÉXITO en {srv['nombre']}: {url}")
-                              time.sleep(3) # Pausa de seguridad
-                              return url
-                      print(f"   ⚠️ Falló {srv['nombre']} (HTTP {r.status_code}) - Saltando al siguiente...")
-                  except Exception as e:
-                      print(f"   ❌ Error de conexión en {srv['nombre']}: {e} - Saltando al siguiente...")
-
-              return None
-
-          # Ejecución principal Instagram
-          access_token = os.environ.get("INSTAGRAM_ACCESS_TOKEN")
-          user_id = os.environ.get("INSTAGRAM_USER_ID")
-          
-          if not access_token or not user_id:
-              print("❌ Credenciales faltantes")
-              sys.exit(1)
-          
-          video_url = subir_video_multi()
-          if not video_url:
-              print("❌ TODOS los servidores temporales fallaron. Imposible publicar.")
-              sys.exit(1)
-          
-          try:
-              session = crear_sesion()
-              titulo = open("titulo.txt", "r", encoding="utf-8").read().strip() if os.path.exists("titulo.txt") else ""
-              descripcion = open("descripcion.txt", "r", encoding="utf-8").read().strip() if os.path.exists("descripcion.txt") else ""
-              caption = f"{titulo}\n\n{descripcion}"[:2200]
+                          if 'catbox' in srv['u']: url = r.text.strip()
+                          else: url = r.json()['data']['url'].replace('tmpfiles.org/', 'tmpfiles.org/dl/')
+                          if url.startswith('http'): break
+                  except: continue
               
-              base = "https://graph.instagram.com/v21.0"
+              if not url: return False
               
-              print("🎬 Creando Reel...")
-              r = session.post(
-                  f"{base}/{user_id}/media",
-                  data={'media_type': 'REELS', 'video_url': video_url, 'caption': caption, 'share_to_feed': 'true', 'access_token': access_token},
-                  timeout=120
-              )
-              data = r.json()
+              caption = f"{open('titulo.txt', encoding='utf-8').read().strip()}\n{open('descripcion.txt', encoding='utf-8').read().strip()}"[:2200]
+              base = f"https://graph.instagram.com/v21.0/{uid}"
               
-              if 'error' in data:
-                  print(f"❌ Error API de Meta: {data['error'].get('message','N/A')}")
-                  sys.exit(1)
+              r = requests.post(f"{base}/media", data={'media_type':'REELS', 'video_url':url, 'caption':caption, 'access_token':token}, timeout=120).json()
+              if 'id' not in r: return False
+              cid = r['id']
               
-              creation_id = data['id']
-              print(f"✅ Contenedor Creado: {creation_id}")
-              
-              print("⏳ Procesando video en Meta (máx 10 min)...")
-              for i in range(60):
+              for _ in range(30):
                   time.sleep(10)
-                  s = session.get(f"{base}/{creation_id}", params={'fields': 'status_code', 'access_token': access_token}, timeout=30).json()
-                  status = s.get('status_code', 'UNKNOWN')
-                  
-                  if status == 'FINISHED':
-                      print("✅ Procesamiento completado")
-                      break
-                  elif status == 'ERROR':
-                      print("❌ Meta rechazó el formato del video o la descarga.")
-                      sys.exit(1)
-                  elif i % 6 == 0:
-                      print(f"   ⏳ {status} ({i*10}s)")
-              else:
-                  print("⏱️ Timeout esperando a Meta")
-                  sys.exit(1)
+                  s = requests.get(f"https://graph.instagram.com/v21.0/{cid}", params={'fields':'status_code', 'access_token':token}, timeout=30).json()
+                  if s.get('status_code') == 'FINISHED': break
+                  if s.get('status_code') == 'ERROR': return False
+              else: return False
               
-              print("🚀 Lanzando publicación...")
-              p = session.post(
-                  f"{base}/{user_id}/media_publish",
-                  data={'creation_id': creation_id, 'access_token': access_token},
-                  timeout=60
-              ).json()
-              
-              if 'id' not in p:
-                  print(f"❌ Error final de publicación: {p}")
-                  sys.exit(1)
-              
-              url = f"https://www.instagram.com/reel/{p['id']}/"
-              print(f"✅ ¡BINGO! Publicado en Instagram: {url}")
-              open("ig_url.txt", "w", encoding="utf-8").write(url)
-              sys.exit(0)
-          
-          except Exception as e:
-              print(f"❌ Error General: {e}")
-              sys.exit(1)
+              p = requests.post(f"{base}/media_publish", data={'creation_id':cid, 'access_token':token}, timeout=60).json()
+              return 'id' in p
+
+          sys.exit(0 if upload() else 1)
           PYTHON_IG
-          
-          python3 publicar_ig.py
-          
-          if [ $? -eq 0 ]; then
-            echo "instagram_status=✅ OK" >> $GITHUB_OUTPUT
-          else
-            echo "instagram_status=❌ Fallo" >> $GITHUB_OUTPUT
-          fi
+          python3 publicar_ig.py && echo "instagram_status=✅ OK" >> $GITHUB_OUTPUT || echo "instagram_status=❌ Fallo" >> $GITHUB_OUTPUT
 
       # ============================================
       # 📲 PASO 9: NOTIFICAR VÍA TELEGRAM
@@ -752,24 +362,12 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          TITULO=$(cat titulo.txt 2>/dev/null | head -c 50 || echo "Sin título")
+          TITULO=$(cat titulo.txt 2>/dev/null || echo "Sin título")
           TITULO_CLEAN=$(echo "$TITULO" | sed 's/[_*[\]()~`>#+=|{}.!-]//g')
           
           YT_STATUS="${{ steps.youtube.outputs.youtube_status || '⚠️ No ejecutado' }}"
           TK_STATUS="${{ steps.tiktok.outputs.tiktok_status || '⚠️ No ejecutado' }}"
           IG_STATUS="${{ steps.instagram.outputs.instagram_status || '⚠️ No ejecutado' }}"
           
-          MENSAJE="🤖 *Dato Crítico - Publicación*%0A%0A"
-          MENSAJE+="📹 ${TITULO_CLEAN}%0A%0A"
-          MENSAJE+="━━━━━━━━━━━━━━━━━━━━%0A"
-          MENSAJE+="📊 *ESTADOS*%0A"
-          MENSAJE+="YouTube: ${YT_STATUS}%0A"
-          MENSAJE+="TikTok: ${TK_STATUS}%0A"
-          MENSAJE+="Instagram: ${IG_STATUS}%0A"
-          MENSAJE+="━━━━━━━━━━━━━━━━━━━━"
-          
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -d chat_id="${TELEGRAM_CHAT_ID}" \
-            -d text="$MENSAJE" \
-            -d parse_mode="Markdown" \
-            -d disable_web_page_preview=true || echo "⚠️ Telegram falló (no crítico)"
+          MENSAJE="🤖 *Publicación*%0A📹 ${TITULO_CLEAN}%0A%0AYouTube: ${YT_STATUS}%0ATikTok: ${TK_STATUS}%0AInstagram: ${IG_STATUS}"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" -d chat_id="${TELEGRAM_CHAT_ID}" -d text="$MENSAJE" -d parse_mode="Markdown" -d disable_web_page_preview=true || true
