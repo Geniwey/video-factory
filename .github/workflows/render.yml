@@ -53,36 +53,61 @@ jobs:
           fc-cache -f 2>/dev/null
 
       # ============================================
-      # 📝 PASO 2: EXTRACCIÓN DIRECTA DEL JSON (BLINDAJE UTF-8)
+      # 📝 PASO 2: EXTRACCIÓN Y LIMPIEZA UTF-8 (FUERZA BRUTA)
       # ============================================
-      - name: Extraer Textos Directamente del JSON
+      - name: Extraer Textos y Reparar UTF-8
         timeout-minutes: 2
         run: |
           cat << 'PYTHON_EXTRACT' > extraer_textos.py
           import json
           import os
+          import sys
 
+          # Forzar UTF-8 en la salida de Python
+          sys.stdout.reconfigure(encoding='utf-8')
+          
           event_path = os.environ.get('GITHUB_EVENT_PATH')
           
-          with open(event_path, 'r', encoding='utf-8') as f:
-              event_data = json.load(f)
+          try:
+              # Leemos el JSON crudo forzando UTF-8
+              with open(event_path, 'r', encoding='utf-8') as f:
+                  event_data = json.load(f)
+          except Exception as e:
+              print(f"❌ Error leyendo el JSON del evento: {e}")
+              event_data = {}
               
           payload = event_data.get('client_payload', {})
           
+          # Extracción segura con fallbacks
           titulo = payload.get('titulo') or 'Noticia Tecnológica 🚀'
           descripcion = payload.get('descripcion') or '#tecnologia #shorts'
           script_text = payload.get('script_text') or 'Lo que acaba de pasar en tecnologia va a cambiar todo.'
           
+          # Función para reparar caracteres rotos si Github los ha masticado
+          def reparar_texto(texto):
+              if not isinstance(texto, str):
+                  return str(texto)
+              # Intentar arreglar si viene con codificación doble o mala
+              try:
+                  return texto.encode('latin1').decode('utf-8')
+              except:
+                  return texto # Si falla, devolver tal cual
+                  
+          titulo_limpio = reparar_texto(titulo)
+          descripcion_limpia = reparar_texto(descripcion)
+          script_limpio = reparar_texto(script_text)
+
+          # Guardar forzando UTF-8 puro
           with open('titulo.txt', 'w', encoding='utf-8') as f:
-              f.write(titulo.strip()[:85])
+              f.write(titulo_limpio.strip()[:85])
               
           with open('descripcion.txt', 'w', encoding='utf-8') as f:
-              f.write(descripcion.strip()[:4500])
+              f.write(descripcion_limpia.strip()[:4500])
               
           with open('script.txt', 'w', encoding='utf-8') as f:
-              f.write(script_text.strip()[:5000])
+              f.write(script_limpio.strip()[:5000])
               
-          print("✅ Textos extraídos correctamente sin corrupción")
+          print("✅ Textos extraídos y reparados correctamente")
           PYTHON_EXTRACT
           
           python3 extraer_textos.py
@@ -119,7 +144,7 @@ jobs:
           echo "$DURATION" > dur.txt
 
       # ============================================
-      # 💬 PASO 4: GENERAR SUBTÍTULOS (CON ESCUDOS DE CLAUDE)
+      # 💬 PASO 4: GENERAR SUBTÍTULOS
       # ============================================
       - name: Generate subtitles
         timeout-minutes: 8
@@ -136,7 +161,6 @@ jobs:
           def generate():
               if not os.path.exists("audio.json"): return False
               
-              # 🛡️ Anti-corrupción JSON de Whisper
               try:
                   try:
                       with open("audio.json", encoding="utf-8") as f: data = json.load(f)
@@ -149,7 +173,6 @@ jobs:
               for seg in data.get("segments", []):
                   for w in seg.get("words", []):
                       word_text = w.get("word", "").strip()
-                      # Filtro de palabras basura (Claude)
                       if word_text and len(word_text) > 1 and word_text.isalpha():
                           words.append(w)
               if len(words) < 2: return False
@@ -171,7 +194,6 @@ jobs:
                           clean = escape_ass(w["word"].strip().upper())
                           if k == j: parts.append("{\\c&H0000D7FF\\fscx115\\fscy115}" + clean + "{\\c&H00FFFFFF\\fscx100\\fscy100}")
                           else: parts.append(clean)
-                      # 🛡️ Ajuste de Sincronización (-0.15s / +0.15s) de Claude
                       lines.append(f"Dialogue: 0,{fmt(cw['start'], -0.15)},{fmt(cw['end'], 0.15)},Default,,0,0,0,,{' '.join(parts)}")
 
               with open("subtitles.ass", "w", encoding="utf-8") as f:
@@ -196,7 +218,6 @@ jobs:
           DUR=$(cat dur.txt)
           SAFE_DUR=$(printf '%.2f' "$DUR")
 
-          # 🛡️ Forzar BOM UTF-8 en subtítulos antes de FFmpeg (Sugerencia Claude)
           file -bi subtitles.ass | grep -q "utf-8" || iconv -f ISO-8859-1 -t UTF-8 subtitles.ass > subtitles_tmp.ass && mv subtitles_tmp.ass subtitles.ass
           printf '\xef\xbb\xbf' > subtitles_bom.ass && cat subtitles.ass >> subtitles_bom.ass && mv subtitles_bom.ass subtitles.ass
 
@@ -248,7 +269,6 @@ jobs:
                   
               youtube = build('youtube', 'v3', credentials=creds)
               
-              # 🛡️ Lectura a prueba de errores de acentos
               titulo = open('titulo.txt', encoding='utf-8', errors='replace').read().strip()
               descripcion = open('descripcion.txt', encoding='utf-8', errors='replace').read().strip()
               
@@ -294,7 +314,6 @@ jobs:
                   subprocess.run(["gh", "secret", "set", "TIKTOK_ACCESS_TOKEN", "-b", access_token], check=False)
               except: return False
 
-              # 🛡️ Lectura a prueba de errores
               t = open('titulo.txt', encoding='utf-8', errors='replace').read().strip()
               d = open('descripcion.txt', encoding='utf-8', errors='replace').read().strip()
               caption = f"{t}\n{d}"[:150]
@@ -342,7 +361,6 @@ jobs:
               
               if not url: return False
               
-              # 🛡️ Lectura a prueba de errores
               t = open('titulo.txt', encoding='utf-8', errors='replace').read().strip()
               d = open('descripcion.txt', encoding='utf-8', errors='replace').read().strip()
               caption = f"{t}\n{d}"[:2200]
