@@ -3,8 +3,8 @@ name: Dato Critico - Produccion y Distribucion
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   PYTHONIOENCODING: utf-8
-  LANG: C.UTF-8
-  LC_ALL: C.UTF-8
+  LANG: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
 
 on:
   repository_dispatch:
@@ -29,33 +29,29 @@ jobs:
       - name: Setup
         timeout-minutes: 5
         run: |
-          echo "🧹 Limpiando repositorios problemáticos..."
+          echo "🧹 Limpiando repositorios..."
           sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list 2>/dev/null || true
           sudo rm -f /etc/apt/sources.list.d/azure-cli.list 2>/dev/null || true
           sudo rm -f /etc/apt/sources.list.d/vscode.list 2>/dev/null || true
           
-          echo "📦 Actualizando repositorios..."
           sudo apt-get update -qq 2>&1 | grep -v "Failed to fetch" || true
           
-          echo "⚙️ Instalando dependencias del sistema..."
           sudo apt-get install -y -qq \
             ffmpeg bc file xvfb chromium-browser chromium-chromedriver \
             fonts-liberation libnss3 libatk-bridge2.0-0 libgbm1 \
             2>&1 | grep -v "debconf: unable to initialize frontend" || true
           
-          echo "🐍 Instalando librerías Python..."
           pip install --quiet --upgrade pip 2>/dev/null
           pip install --quiet openai-whisper edge-tts requests google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client 2>/dev/null
           
-          echo "🔤 Configurando fuentes..."
           mkdir -p ~/.fonts
           wget -q -O ~/.fonts/Montserrat-Black.ttf "https://github.com/google/fonts/raw/main/ofl/montserrat/static/Montserrat-Black.ttf" 2>/dev/null || true
           fc-cache -f 2>/dev/null
 
       # ============================================
-      # 📝 PASO 2: EXTRACCIÓN Y LIMPIEZA UTF-8 (FUERZA BRUTA)
+      # 📝 PASO 2: EXTRACCIÓN ROBUSTA (ANTI-ERRORES UTF-8)
       # ============================================
-      - name: Extraer Textos y Reparar UTF-8
+      - name: Extraer Textos Directamente del JSON
         timeout-minutes: 2
         run: |
           cat << 'PYTHON_EXTRACT' > extraer_textos.py
@@ -63,51 +59,46 @@ jobs:
           import os
           import sys
 
-          # Forzar UTF-8 en la salida de Python
           sys.stdout.reconfigure(encoding='utf-8')
-          
           event_path = os.environ.get('GITHUB_EVENT_PATH')
           
           try:
-              # Leemos el JSON crudo forzando UTF-8
-              with open(event_path, 'r', encoding='utf-8') as f:
-                  event_data = json.load(f)
+              # Fuerza bruta para leer el archivo de Activepieces correctamente
+              with open(event_path, 'rb') as f:
+                  raw_data = f.read()
+                  try:
+                      text_data = raw_data.decode('utf-8-sig')
+                  except UnicodeDecodeError:
+                      text_data = raw_data.decode('latin-1')
+              event_data = json.loads(text_data)
           except Exception as e:
-              print(f"❌ Error leyendo el JSON del evento: {e}")
+              print(f"❌ Error crítico leyendo JSON: {e}")
               event_data = {}
               
           payload = event_data.get('client_payload', {})
           
-          # Extracción segura con fallbacks
-          titulo = payload.get('titulo') or 'Noticia Tecnológica 🚀'
-          descripcion = payload.get('descripcion') or '#tecnologia #shorts'
-          script_text = payload.get('script_text') or 'Lo que acaba de pasar en tecnologia va a cambiar todo.'
-          
-          # Función para reparar caracteres rotos si Github los ha masticado
-          def reparar_texto(texto):
-              if not isinstance(texto, str):
-                  return str(texto)
-              # Intentar arreglar si viene con codificación doble o mala
+          def fix_text(t):
+              if not t: return ""
               try:
-                  return texto.encode('latin1').decode('utf-8')
+                  # Repara doble codificación si Activepieces la mandó mal
+                  return t.encode('latin1').decode('utf-8')
               except:
-                  return texto # Si falla, devolver tal cual
-                  
-          titulo_limpio = reparar_texto(titulo)
-          descripcion_limpia = reparar_texto(descripcion)
-          script_limpio = reparar_texto(script_text)
+                  return t
 
-          # Guardar forzando UTF-8 puro
+          titulo = fix_text(payload.get('titulo')) or 'Noticia Tecnológica 🚀'
+          descripcion = fix_text(payload.get('descripcion')) or '#tecnologia #shorts'
+          script_text = fix_text(payload.get('script_text')) or 'Lo que acaba de pasar en tecnologia va a cambiar todo.'
+          
           with open('titulo.txt', 'w', encoding='utf-8') as f:
-              f.write(titulo_limpio.strip()[:85])
+              f.write(titulo.strip()[:85])
               
           with open('descripcion.txt', 'w', encoding='utf-8') as f:
-              f.write(descripcion_limpia.strip()[:4500])
+              f.write(descripcion.strip()[:4500])
               
           with open('script.txt', 'w', encoding='utf-8') as f:
-              f.write(script_limpio.strip()[:5000])
+              f.write(script_text.strip()[:5000])
               
-          print("✅ Textos extraídos y reparados correctamente")
+          print("✅ Textos extraídos y blindados en UTF-8")
           PYTHON_EXTRACT
           
           python3 extraer_textos.py
@@ -144,7 +135,7 @@ jobs:
           echo "$DURATION" > dur.txt
 
       # ============================================
-      # 💬 PASO 4: GENERAR SUBTÍTULOS
+      # 💬 PASO 4: GENERAR SUBTÍTULOS (CON ESCUDOS)
       # ============================================
       - name: Generate subtitles
         timeout-minutes: 8
