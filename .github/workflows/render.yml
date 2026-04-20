@@ -1,13 +1,18 @@
 # ==============================================================================
-# 🚀 PIPELINE NUCLEAR v3.1 - DATO CRÍTICO - SISTEMA DE VIDEO AUTOMÁTICO
+# 🚀 PIPELINE NUCLEAR v3.2 - DATO CRÍTICO - SISTEMA DE VIDEO AUTOMÁTICO
 # ==============================================================================
-# VERSIÓN: 3.1.0 - CURA DE SUBTÍTULOS Y SIN RECORTES
+# VERSIÓN: 3.2.0 - CURA DEFINITIVA DE SUBTÍTULOS (SIN SALTOS NI DOBLES)
 # DESCRIPCIÓN: Pipeline completo para generar y publicar Shorts/Reels automáticos
-#              con subtítulos perfectos (sin saltos), voz con triple fallback, 
-#              y logs exhaustivos.
+#              con subtítulos fluidos continuos, voz con triple fallback, 
+#              y logs exhaustivos sin recortes.
 # ==============================================================================
 
 name: "Dato Critico - Pipeline Nuclear v3.0"
+
+# 🛡️ EL SEGURATA: Evita vídeos dobles
+concurrency:
+  group: render-video-unico
+  cancel-in-progress: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -266,7 +271,7 @@ jobs:
           echo "video_duration=${DURACION_INT}" >> $GITHUB_OUTPUT
           rm -f audio_attempt1.mp3 audio_attempt2.mp3 audio_attempt3.mp3
 
-      - name: "💬 Generar subtítulos (Whisper Medium + ASS sin saltos)"
+      - name: "💬 Generar subtítulos matemáticamente perfectos"
         timeout-minutes: 15
         run: |
           echo "=============================================="
@@ -317,10 +322,13 @@ jobs:
               with open('audio.json', 'r', encoding='utf-8') as f: data = json.load(f)
           except: sys.exit(1)
 
+          # Asegurarse de que el end_time de una palabra siempre sea mayor que el start_time
           all_words = [{'word': clean_for_ass(w.get('word','')), 'start': w.get('start',0.0), 'end': w.get('end',0.0)} for s in data.get('segments',[]) for w in s.get('words',[]) if w.get('word','').strip() and w.get('end',0)>w.get('start',0)]
 
           font_name = os.environ.get('FONT_NAME', 'Montserrat Black')
-          # TAMAÑO DE FUENTE A 75 PARA QUE NO SE SALGA DE LA PANTALLA
+          
+          # TAMAÑO DE FUENTE Y MÁRGENES ESTABILIZADOS
+          # Size 70: Evita que se salgan de pantalla. MarginV 280: Los sube para no tapar UI.
           ASS_HEADER = f"""[Script Info]
           ScriptType: v4.00+
           WrapStyle: 1
@@ -330,7 +338,7 @@ jobs:
 
           [V4+ Styles]
           Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-          Style: Default,{font_name},75,&H00FFFFFF,&H0000FFFF,&H00000000,&HAA000000,-1,0,0,0,100,100,0,0,1,5,3,2,60,60,200,1
+          Style: Default,{font_name},70,&H00FFFFFF,&H0000FFFF,&H00000000,&H88000000,-1,0,0,0,100,100,0,0,1,6,4,2,40,40,280,1
 
           [Events]
           Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -344,20 +352,37 @@ jobs:
               if not group: continue
 
               for active_word_idx, active_word in enumerate(group):
-                  # CERO SOLAPAMIENTOS: El final de una línea es el inicio exacto de la otra
                   line_start = active_word['start']
-                  line_end = active_word['end']
+                  
+                  # MATEMÁTICA PURA PARA CERO SOLAPAMIENTOS Y SALTOS
+                  if active_word_idx < len(group) - 1:
+                      # El fin de esta palabra es EXACTAMENTE el inicio de la siguiente
+                      line_end = group[active_word_idx + 1]['start']
+                  else:
+                      # Si es la última palabra del grupo, termina donde dice Whisper
+                      line_end = active_word['end'] + 0.1
+                      # Pero si hay un siguiente grupo, NO NOS PODEMOS SOLAPAR
+                      if group_start_idx + WORDS_PER_GROUP < len(all_words):
+                          next_group_start = all_words[group_start_idx + WORDS_PER_GROUP]['start']
+                          line_end = min(line_end, next_group_start)
                   
                   text_parts = []
                   for word_idx, word in enumerate(group):
                       word_text = fix_spanglish(word['word'])
                       if word_idx == active_word_idx:
-                          text_parts.append(r'{\c&H0000FFFF&\fscx115\fscy115}' + word_text + r'{\c&H00FFFFFF&\fscx100\fscy100}')
+                          # Amarillo vibrante y pop
+                          text_parts.append(r'{\c&H0000E6FF&\fscx112\fscy112}' + word_text + r'{\c&H00FFFFFF&\fscx100\fscy100}')
                       else:
+                          # Blanco puro
                           text_parts.append(word_text)
+
+                  # Si por algún motivo matemático start >= end (ej. Whisper falla), ignorar la línea
+                  if line_start >= line_end:
+                      continue
 
                   dialogue_lines.append(f"Dialogue: 0,{format_time_ass(line_start)},{format_time_ass(line_end)},Default,,0,0,0,,{' '.join(text_parts)}")
 
+          # Se escribe SIN NINGÚN TIPO DE BOM
           with open('subtitles.ass', 'w', encoding='utf-8') as f:
               f.write(ASS_HEADER + '\n' + '\n'.join(dialogue_lines))
           PYTHON_SUBTITULOS
@@ -375,7 +400,7 @@ jobs:
           ASS_PATH=$(realpath subtitles.ass)
           ASS_PATH_ESCAPED=$(echo "$ASS_PATH" | sed 's/:/\\:/g')
 
-          # 🛡️ FORZAR LA LECTURA DE LA FUENTE EN EL COMANDO FFMPEG
+          # 🛡️ FFmpeg SIN BOM y FORZANDO LA LECTURA DE LA FUENTE
           ffmpeg -y \
             -stream_loop -1 \
             -i pexels.mp4 \
