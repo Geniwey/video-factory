@@ -1,15 +1,11 @@
 # ==============================================================================
-# 🚀 PIPELINE NUCLEAR v3.2 - DATO CRÍTICO - SISTEMA DE VIDEO AUTOMÁTICO
+# 🚀 PIPELINE NUCLEAR v3.3 - DATO CRÍTICO - SISTEMA DE VIDEO AUTOMÁTICO
 # ==============================================================================
-# VERSIÓN: 3.2.0 - CURA DEFINITIVA DE SUBTÍTULOS (SIN SALTOS NI DOBLES)
-# DESCRIPCIÓN: Pipeline completo para generar y publicar Shorts/Reels automáticos
-#              con subtítulos fluidos continuos, voz con triple fallback, 
-#              y logs exhaustivos sin recortes.
+# VERSIÓN: 3.3.0 - FIX INSTALACIÓN PYTHON, SERVIDOR ESTABLE Y SUBS PERFECTOS
 # ==============================================================================
 
 name: "Dato Critico - Pipeline Nuclear v3.0"
 
-# 🛡️ EL SEGURATA: Evita vídeos dobles
 concurrency:
   group: render-video-unico
   cancel-in-progress: false
@@ -34,7 +30,8 @@ permissions:
 
 jobs:
   render-and-publish:
-    runs-on: ubuntu-latest
+    # 🛡️ FIX CLAVE 1: Congelamos la versión en 22.04 para evitar bloqueos de Python
+    runs-on: ubuntu-22.04
     timeout-minutes: 45
 
     outputs:
@@ -58,8 +55,6 @@ jobs:
           echo "💾 RAM libre: $(free -h | awk '/^Mem:/ {print $4}')"
           echo "💽 Disco disponible: $(df -h /home/runner | awk 'NR==2 {print $4}')"
           echo "🐍 Python version: $(python3 --version 2>&1)"
-          echo "📦 pip version: $(pip3 --version 2>&1 | head -1)"
-          echo "🎬 FFmpeg version: $(ffmpeg -version 2>&1 | head -1 || echo 'No instalado aún')"
           echo "=============================================="
 
       - name: "📂 Checkout del repositorio"
@@ -74,16 +69,11 @@ jobs:
           echo "📦 INSTALANDO DEPENDENCIAS DEL SISTEMA"
           echo "=============================================="
 
-          sudo apt-get update -qq 2>&1 | tail -5 || {
-            echo "⚠️  apt-get update tuvo advertencias, continuando..."
-          }
+          sudo apt-get update -qq 2>&1 | tail -5 || true
 
           sudo apt-get install -y -qq \
             ffmpeg bc file wget curl fonts-liberation libnss3 libatk-bridge2.0-0 libgbm1 fontconfig \
             2>&1 | grep -E "(error|Error|ERROR)" || true
-
-          echo ""
-          echo "✅ Paquetes del sistema instalados"
 
           echo ""
           echo "🔤 Instalando fuente Montserrat Black..."
@@ -91,17 +81,6 @@ jobs:
 
           FONT_DOWNLOADED=false
           wget -q --timeout=30 -O ~/.fonts/Montserrat-Black.ttf "https://github.com/google/fonts/raw/main/ofl/montserrat/static/Montserrat-Black.ttf" 2>/dev/null && FONT_DOWNLOADED=true || true
-
-          if [ "$FONT_DOWNLOADED" = "true" ]; then
-            FONT_SIZE=$(stat -c%s ~/.fonts/Montserrat-Black.ttf 2>/dev/null || echo 0)
-            if [ "$FONT_SIZE" -lt 100000 ]; then
-              FONT_DOWNLOADED=false
-            fi
-          fi
-
-          if [ "$FONT_DOWNLOADED" = "false" ]; then
-            wget -q --timeout=30 -O ~/.fonts/Montserrat-Black.ttf "https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/montserrat/static/Montserrat-Black.ttf" 2>/dev/null && FONT_DOWNLOADED=true || true
-          fi
 
           if [ "$FONT_DOWNLOADED" = "false" ]; then
             cp /usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf ~/.fonts/Montserrat-Black.ttf 2>/dev/null || true
@@ -114,14 +93,11 @@ jobs:
           echo "✅ Fuente configurada: $(cat $GITHUB_ENV | grep FONT_NAME)"
 
           echo ""
-          echo "🐍 Instalando dependencias de Python..."
+          echo "🐍 Instalando dependencias de Python (Forzado)..."
 
-          pip install --quiet --upgrade pip 2>&1 | tail -3
-          pip install --quiet \
-            "openai-whisper==20231117" "edge-tts>=6.1.9" "requests>=2.31.0" "gtts>=2.5.0" \
-            "google-auth>=2.23.0" "google-auth-oauthlib>=1.1.0" "google-auth-httplib2>=0.1.1" \
-            "google-api-python-client>=2.100.0" "numpy>=1.24.0" "tqdm>=4.66.0" \
-            2>&1 | grep -E "(error|Error|ERROR|Successfully installed)" || true
+          # 🛡️ FIX CLAVE 2: Instalación forzada de librerías para esquivar bloqueos
+          python3 -m pip install --upgrade pip --break-system-packages || python3 -m pip install --upgrade pip
+          python3 -m pip install openai-whisper edge-tts requests gtts google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client numpy tqdm --break-system-packages || python3 -m pip install openai-whisper edge-tts requests gtts google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client numpy tqdm
 
           echo "✅ Dependencias Python instaladas"
 
@@ -133,15 +109,8 @@ jobs:
           DESCRIPCION_RAW: ${{ github.event.client_payload.descripcion }}
           SCRIPT_RAW: ${{ github.event.client_payload.script_text }}
         run: |
-          echo "=============================================="
-          echo "📝 EXTRACCIÓN Y LIMPIEZA DE TEXTOS"
-          echo "=============================================="
-
           cat << 'PYTHON_EXTRAER' > /tmp/extraer_textos.py
-          import os
-          import sys
-          import unicodedata
-          import re
+          import os, sys, unicodedata, re
 
           sys.stdout.reconfigure(encoding='utf-8')
           sys.stderr.reconfigure(encoding='utf-8')
@@ -159,47 +128,29 @@ jobs:
               if not text: return ''
               text = text.lstrip('\ufeff')
               text = text.replace('\u00a0', ' ')
-              invisible_chars = ['\u200b', '\u200c', '\u200d', '\u200e', '\u200f', '\u2060', '\u00ad', '\u00ac', '\u2028', '\u2029']
-              for char in invisible_chars: text = text.replace(char, '')
+              for char in ['\u200b', '\u200c', '\u200d', '\u200e', '\u200f', '\u2060', '\u00ad', '\u00ac', '\u2028', '\u2029']: 
+                  text = text.replace(char, '')
               text = text.replace('\u2019', "'").replace('\u2018', "'").replace('\u201c', '"').replace('\u201d', '"')
               text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
               text = re.sub(r' {2,}', ' ', text)
-              text = re.sub(r'\n{3,}', '\n\n', text)
-              return text.strip()
+              return re.sub(r'\n{3,}', '\n\n', text).strip()
 
-          def validate_and_limit(text, max_length, field_name, default_value):
+          def validate_and_limit(text, max_length, default_value):
               if not text or len(text.strip()) < 3: return default_value
               return text.strip()[:max_length]
 
-          titulo_raw = os.environ.get('TITULO_RAW', '')
-          descripcion_raw = os.environ.get('DESCRIPCION_RAW', '')
-          script_raw = os.environ.get('SCRIPT_RAW', '')
+          titulo = validate_and_limit(clean_invisible_chars(repair_encoding(os.environ.get('TITULO_RAW', ''))), 100, "🚀 Noticia Tech del Momento")
+          descripcion = validate_and_limit(clean_invisible_chars(repair_encoding(os.environ.get('DESCRIPCION_RAW', ''))), 5000, "#tech #noticias #shorts")
+          script_text = validate_and_limit(clean_invisible_chars(repair_encoding(os.environ.get('SCRIPT_RAW', ''))), 5000, "Esto cambia todo lo que conocías. Sigue viendo.")
 
-          titulo_limpio = clean_invisible_chars(repair_encoding(titulo_raw))
-          descripcion_limpia = clean_invisible_chars(repair_encoding(descripcion_raw))
-          script_limpio = clean_invisible_chars(repair_encoding(script_raw))
-
-          titulo_final = validate_and_limit(titulo_limpio, 100, "titulo", "🚀 Noticia Tech del Momento")
-          descripcion_final = validate_and_limit(descripcion_limpia, 5000, "descripcion", "#tech #noticias #shorts #viral")
-          script_final = validate_and_limit(script_limpio, 5000, "script_text", "Esto cambia todo lo que conocías. Sigue viendo.")
-
-          with open('titulo.txt', 'w', encoding='utf-8') as f: f.write(titulo_final)
-          with open('descripcion.txt', 'w', encoding='utf-8') as f: f.write(descripcion_final)
-          with open('script.txt', 'w', encoding='utf-8') as f: f.write(script_final)
-          with open('titulo_corto.txt', 'w', encoding='utf-8') as f: f.write(titulo_final[:50])
-
-          print("✅ EXTRACCIÓN COMPLETADA EXITOSAMENTE")
+          with open('titulo.txt', 'w', encoding='utf-8') as f: f.write(titulo)
+          with open('descripcion.txt', 'w', encoding='utf-8') as f: f.write(descripcion)
+          with open('script.txt', 'w', encoding='utf-8') as f: f.write(script_text)
+          with open('titulo_corto.txt', 'w', encoding='utf-8') as f: f.write(titulo[:50])
+          print("✅ EXTRACCIÓN COMPLETADA")
           PYTHON_EXTRAER
 
           python3 /tmp/extraer_textos.py
-
-          for archivo in titulo.txt descripcion.txt script.txt; do
-            if [ ! -f "$archivo" ] || [ ! -s "$archivo" ]; then
-              echo "  ❌ ERROR: $archivo no existe o está vacío"
-              exit 1
-            fi
-          done
-
           TITULO_CORTO=$(python3 -c "print(open('titulo_corto.txt', encoding='utf-8').read().strip())" 2>/dev/null || echo "Video sin título")
           echo "titulo_corto=${TITULO_CORTO}" >> $GITHUB_OUTPUT
 
@@ -207,29 +158,15 @@ jobs:
         id: audio_gen
         timeout-minutes: 8
         run: |
-          echo "=============================================="
-          echo "📥 DESCARGA DE VIDEO BASE Y AUDIO"
-          echo "=============================================="
-
-          VIDEO_URL="${{ github.event.client_payload.video_url }}"
-          VIDEO_URL=$(echo "$VIDEO_URL" | tr -d '\r\n"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          VIDEO_URL=$(echo "${{ github.event.client_payload.video_url }}" | tr -d '\r\n"' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
           VIDEO_OK=false
 
           if [ -n "$VIDEO_URL" ] && [ "$VIDEO_URL" != "null" ] && [ "$VIDEO_URL" != "undefined" ]; then
-            curl -L --max-time 60 --retry 3 --connect-timeout 15 -A "Mozilla/5.0" -o pexels_raw.mp4 "$VIDEO_URL" 2>&1 | tail -3 || true
-
-            if [ -f "pexels_raw.mp4" ] && [ -s "pexels_raw.mp4" ]; then
-              FILE_SIZE=$(stat -c%s pexels_raw.mp4)
-              if [ "$FILE_SIZE" -gt 50000 ]; then
-                CODEC=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 pexels_raw.mp4 2>/dev/null || echo "unknown")
-                if [ "$CODEC" = "h264" ]; then
-                  ffmpeg -y -i pexels_raw.mp4 -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1" -c:v libx264 -preset ultrafast -crf 23 -pix_fmt yuv420p -an pexels.mp4 2>/dev/null || true
-                else
-                  ffmpeg -y -i pexels_raw.mp4 -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1" -c:v libx264 -preset ultrafast -crf 23 -pix_fmt yuv420p -an pexels.mp4 2>/dev/null || true
-                fi
-
-                if [ -f "pexels.mp4" ] && [ -s "pexels.mp4" ]; then VIDEO_OK=true; fi
-              fi
+            curl -L --max-time 60 --retry 3 --connect-timeout 15 -A "Mozilla/5.0" -o pexels_raw.mp4 "$VIDEO_URL" 2>/dev/null || true
+            if [ -s "pexels_raw.mp4" ] && [ "$(stat -c%s pexels_raw.mp4)" -gt 50000 ]; then
+              CODEC=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 pexels_raw.mp4 2>/dev/null || echo "unknown")
+              ffmpeg -y -i pexels_raw.mp4 -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1" -c:v libx264 -preset ultrafast -crf 23 -pix_fmt yuv420p -an pexels.mp4 2>/dev/null || true
+              if [ -s "pexels.mp4" ]; then VIDEO_OK=true; fi
             fi
           fi
 
@@ -238,32 +175,23 @@ jobs:
           fi
           rm -f pexels_raw.mp4
 
-          echo "🎙️ Generando audio..."
           AUDIO_OK=false
           edge-tts --voice "es-ES-AlvaroNeural" --rate="+5%" --pitch="-3Hz" --file script.txt --write-media audio_attempt1.mp3 2>/dev/null || true
           if [ "$(stat -c%s audio_attempt1.mp3 2>/dev/null || echo 0)" -gt 5000 ]; then
-            cp audio_attempt1.mp3 audio.mp3
-            AUDIO_OK=true
+            cp audio_attempt1.mp3 audio.mp3; AUDIO_OK=true
           else
             edge-tts --voice "es-ES-JorgeNeural" --rate="+5%" --file script.txt --write-media audio_attempt2.mp3 2>/dev/null || true
             if [ "$(stat -c%s audio_attempt2.mp3 2>/dev/null || echo 0)" -gt 5000 ]; then
-              cp audio_attempt2.mp3 audio.mp3
-              AUDIO_OK=true
+              cp audio_attempt2.mp3 audio.mp3; AUDIO_OK=true
             else
               python3 -c "from gtts import gTTS; gTTS(text=open('script.txt', encoding='utf-8').read().strip(), lang='es').save('audio_attempt3.mp3')" 2>/dev/null || true
-              if [ "$(stat -c%s audio_attempt3.mp3 2>/dev/null || echo 0)" -gt 5000 ]; then
-                cp audio_attempt3.mp3 audio.mp3
-                AUDIO_OK=true
-              fi
+              if [ "$(stat -c%s audio_attempt3.mp3 2>/dev/null || echo 0)" -gt 5000 ]; then cp audio_attempt3.mp3 audio.mp3; AUDIO_OK=true; fi
             fi
           fi
 
-          if [ "$AUDIO_OK" = "false" ]; then
-            ffmpeg -y -f lavfi -i "sine=frequency=440:duration=30" -c:a libmp3lame -b:a 128k audio.mp3 2>/dev/null || true
-          fi
-
+          if [ "$AUDIO_OK" = "false" ]; then ffmpeg -y -f lavfi -i "sine=frequency=440:duration=30" -c:a libmp3lame -b:a 128k audio.mp3 2>/dev/null || true; fi
           ffmpeg -y -i audio.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null
-          if [ ! -f "audio.wav" ] || [ ! -s "audio.wav" ]; then exit 1; fi
+          if [ ! -s "audio.wav" ]; then exit 1; fi
 
           DURACION=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 audio.wav 2>/dev/null || echo "30")
           DURACION_INT=$(python3 -c "print(f'{max(10, min(180, float(\"$DURACION\"))):.2f}')")
@@ -274,30 +202,16 @@ jobs:
       - name: "💬 Generar subtítulos matemáticamente perfectos"
         timeout-minutes: 15
         run: |
-          echo "=============================================="
-          echo "🎤 TRANSCRIPCIÓN CON WHISPER Y SUBTÍTULOS ASS"
-          echo "=============================================="
-
           python3 -c "
-          import whisper
-          import json
-          import sys
+          import whisper, json, sys
           sys.stdout.reconfigure(encoding='utf-8')
           model = whisper.load_model('medium')
-          result = model.transcribe('audio.wav', language='es', word_timestamps=True, condition_on_previous_text=True, initial_prompt='Este es un vídeo de noticias de tecnología en español de España.', temperature=0.0, beam_size=5)
-          with open('audio.json', 'w', encoding='utf-8') as f: json.dump(result, f, ensure_ascii=False, indent=2)
+          result = model.transcribe('audio.wav', language='es', word_timestamps=True, condition_on_previous_text=True, initial_prompt='Vídeo de noticias de tecnología en español de España.', temperature=0.0, beam_size=5)
+          with open('audio.json', 'w', encoding='utf-8') as f: json.dump(result, f, ensure_ascii=False)
           " 2>/dev/null || true
 
-          if [ ! -f "audio.json" ] || [ ! -s "audio.json" ]; then
-            echo "⚠️  Whisper falló, usando fallback básico..."
-            python3 -c "
-          import json
-          text = open('script.txt', encoding='utf-8').read().strip().split()
-          dur = float(open('dur.txt').read().strip())
-          tpw = dur / max(len(text), 1)
-          segs = [{'start': i*tpw, 'end': (i+1)*tpw, 'words': [{'word': w, 'start': i*tpw, 'end': (i+1)*tpw}]} for i, w in enumerate(text)]
-          json.dump({'segments': segs}, open('audio.json', 'w', encoding='utf-8'))
-          "
+          if [ ! -s "audio.json" ]; then
+            python3 -c "import json; t=open('script.txt',encoding='utf-8').read().strip().split(); d=float(open('dur.txt').read().strip()); tpw=d/max(len(t),1); json.dump({'segments': [{'start':i*tpw,'end':(i+1)*tpw,'words':[{'word':w,'start':i*tpw,'end':(i+1)*tpw}]} for i,w in enumerate(t)]}, open('audio.json','w',encoding='utf-8'))"
           fi
 
           cat << 'PYTHON_SUBTITULOS' > /tmp/gen_subtitulos.py
@@ -305,7 +219,7 @@ jobs:
           sys.stdout.reconfigure(encoding='utf-8')
 
           SPANGLISH_FIXES = {'HACK': 'TRUCO', 'HAC': 'TRUCO', 'PLOTTWIST': 'GIRO INESPERADO', 'PLOT TWIST': 'GIRO INESPERADO', 'PLOTTUIST': 'GIRO INESPERADO', 'FAKENIUS': 'FALSO', 'FAKE': 'FALSO'}
-
+          
           def fix_spanglish(text):
               t = text.upper().strip()
               for eng, esp in SPANGLISH_FIXES.items(): t = re.sub(r'\b' + re.escape(eng) + r'\b', esp, t)
@@ -322,13 +236,9 @@ jobs:
               with open('audio.json', 'r', encoding='utf-8') as f: data = json.load(f)
           except: sys.exit(1)
 
-          # Asegurarse de que el end_time de una palabra siempre sea mayor que el start_time
           all_words = [{'word': clean_for_ass(w.get('word','')), 'start': w.get('start',0.0), 'end': w.get('end',0.0)} for s in data.get('segments',[]) for w in s.get('words',[]) if w.get('word','').strip() and w.get('end',0)>w.get('start',0)]
-
           font_name = os.environ.get('FONT_NAME', 'Montserrat Black')
-          
-          # TAMAÑO DE FUENTE Y MÁRGENES ESTABILIZADOS
-          # Size 70: Evita que se salgan de pantalla. MarginV 280: Los sube para no tapar UI.
+
           ASS_HEADER = f"""[Script Info]
           ScriptType: v4.00+
           WrapStyle: 1
@@ -345,46 +255,30 @@ jobs:
           """.replace('          ', '')
 
           dialogue_lines = []
-          WORDS_PER_GROUP = 3
-
-          for group_start_idx in range(0, len(all_words), WORDS_PER_GROUP):
-              group = all_words[group_start_idx:group_start_idx + WORDS_PER_GROUP]
+          for group_start_idx in range(0, len(all_words), 3):
+              group = all_words[group_start_idx:group_start_idx + 3]
               if not group: continue
 
               for active_word_idx, active_word in enumerate(group):
                   line_start = active_word['start']
                   
-                  # MATEMÁTICA PURA PARA CERO SOLAPAMIENTOS Y SALTOS
+                  # 🛡️ FIX CLAVE 3: Cero solapamientos de tiempo
                   if active_word_idx < len(group) - 1:
-                      # El fin de esta palabra es EXACTAMENTE el inicio de la siguiente
                       line_end = group[active_word_idx + 1]['start']
                   else:
-                      # Si es la última palabra del grupo, termina donde dice Whisper
                       line_end = active_word['end'] + 0.1
-                      # Pero si hay un siguiente grupo, NO NOS PODEMOS SOLAPAR
-                      if group_start_idx + WORDS_PER_GROUP < len(all_words):
-                          next_group_start = all_words[group_start_idx + WORDS_PER_GROUP]['start']
-                          line_end = min(line_end, next_group_start)
+                      if group_start_idx + 3 < len(all_words): line_end = min(line_end, all_words[group_start_idx + 3]['start'])
                   
                   text_parts = []
                   for word_idx, word in enumerate(group):
                       word_text = fix_spanglish(word['word'])
-                      if word_idx == active_word_idx:
-                          # Amarillo vibrante y pop
-                          text_parts.append(r'{\c&H0000E6FF&\fscx112\fscy112}' + word_text + r'{\c&H00FFFFFF&\fscx100\fscy100}')
-                      else:
-                          # Blanco puro
-                          text_parts.append(word_text)
+                      if word_idx == active_word_idx: text_parts.append(r'{\c&H0000E6FF&\fscx112\fscy112}' + word_text + r'{\c&H00FFFFFF&\fscx100\fscy100}')
+                      else: text_parts.append(word_text)
 
-                  # Si por algún motivo matemático start >= end (ej. Whisper falla), ignorar la línea
-                  if line_start >= line_end:
-                      continue
+                  if line_start < line_end:
+                      dialogue_lines.append(f"Dialogue: 0,{format_time_ass(line_start)},{format_time_ass(line_end)},Default,,0,0,0,,{' '.join(text_parts)}")
 
-                  dialogue_lines.append(f"Dialogue: 0,{format_time_ass(line_start)},{format_time_ass(line_end)},Default,,0,0,0,,{' '.join(text_parts)}")
-
-          # Se escribe SIN NINGÚN TIPO DE BOM
-          with open('subtitles.ass', 'w', encoding='utf-8') as f:
-              f.write(ASS_HEADER + '\n' + '\n'.join(dialogue_lines))
+          with open('subtitles.ass', 'w', encoding='utf-8') as f: f.write(ASS_HEADER + '\n' + '\n'.join(dialogue_lines))
           PYTHON_SUBTITULOS
 
           python3 /tmp/gen_subtitulos.py
@@ -392,41 +286,17 @@ jobs:
       - name: "🎬 Renderizar video final"
         timeout-minutes: 20
         run: |
-          echo "=============================================="
-          echo "🎬 RENDERIZADO FINAL DEL VIDEO"
-          echo "=============================================="
-
           DUR=$(cat dur.txt)
           ASS_PATH=$(realpath subtitles.ass)
           ASS_PATH_ESCAPED=$(echo "$ASS_PATH" | sed 's/:/\\:/g')
 
-          # 🛡️ FFmpeg SIN BOM y FORZANDO LA LECTURA DE LA FUENTE
           ffmpeg -y \
-            -stream_loop -1 \
-            -i pexels.mp4 \
-            -i audio.wav \
-            -filter_complex "
-              [0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,eq=brightness=-0.05:saturation=1.1:contrast=1.05[bg];
-              [bg]subtitles='${ASS_PATH_ESCAPED}':fontsdir=~/.fonts[vwithsubs];
-              [vwithsubs]drawbox=x=0:y=0:w='min(iw\,iw*t/${DUR})':h=10:color=0xFFD700@0.9:t=fill[outv]
-            " \
-            -map "[outv]" \
-            -map 1:a \
-            -c:v libx264 \
-            -preset fast \
-            -crf 22 \
-            -pix_fmt yuv420p \
-            -c:a aac \
-            -b:a 192k \
-            -t "$DUR" \
-            -movflags +faststart \
-            output.mp4 \
+            -stream_loop -1 -i pexels.mp4 -i audio.wav \
+            -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,eq=brightness=-0.05:saturation=1.1:contrast=1.05[bg];[bg]subtitles='${ASS_PATH_ESCAPED}':fontsdir=~/.fonts[vwithsubs];[vwithsubs]drawbox=x=0:y=0:w='min(iw\,iw*t/${DUR})':h=10:color=0xFFD700@0.9:t=fill[outv]" \
+            -map "[outv]" -map 1:a -c:v libx264 -preset fast -crf 22 -pix_fmt yuv420p -c:a aac -b:a 192k -t "$DUR" -movflags +faststart output.mp4 \
             2>&1 | tee ffmpeg_output.log | tail -20
 
-          if [ ! -f "output.mp4" ] || [ "$(stat -c%s output.mp4)" -lt 100000 ]; then
-            echo "❌ ERROR CRÍTICO: output.mp4 no generado correctamente"
-            exit 1
-          fi
+          if [ ! -f "output.mp4" ] || [ "$(stat -c%s output.mp4)" -lt 100000 ]; then exit 1; fi
 
       - name: "📺 Publicar en YouTube"
         id: youtube
@@ -444,15 +314,13 @@ jobs:
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaFileUpload
           from googleapiclient.errors import HttpError
-
           sys.stdout.reconfigure(encoding='utf-8')
 
           try:
               client_id = os.environ.get('YOUTUBE_CLIENT_ID', '')
               client_secret = os.environ.get('YOUTUBE_CLIENT_SECRET', '')
               refresh_token = os.environ.get('YOUTUBE_REFRESH_TOKEN', '')
-              if not all([client_id, client_secret, refresh_token]):
-                  raise ValueError("Faltan secretos de YouTube")
+              if not all([client_id, client_secret, refresh_token]): raise ValueError("Faltan secretos de YouTube")
 
               token_data = {'token': None, 'refresh_token': refresh_token, 'token_uri': 'https://oauth2.googleapis.com/token', 'client_id': client_id, 'client_secret': client_secret, 'scopes': ['https://www.googleapis.com/auth/youtube.upload']}
               creds = Credentials.from_authorized_user_info(token_data)
@@ -472,15 +340,9 @@ jobs:
               while response is None:
                   status, response = upload_request.next_chunk()
                   if status: print(f"   📤 Progreso: {int(status.progress() * 100)}%")
-
               print(f"\n✅ VIDEO SUBIDO EXITOSAMENTE: https://www.youtube.com/shorts/{response.get('id')}")
-          except HttpError as e:
-              print(f"\n❌ ERROR API YOUTUBE: Status {e.resp.status}")
-              print(f"Mensaje: {e.content.decode('utf-8')}")
-              sys.exit(1)
-          except Exception as e:
-              print(f"\n❌ ERROR GENERAL YOUTUBE: {e}")
-              sys.exit(1)
+          except HttpError as e: print(f"\n❌ ERROR API YOUTUBE: {e.content.decode('utf-8')}"); sys.exit(1)
+          except Exception as e: print(f"\n❌ ERROR GENERAL YOUTUBE: {e}"); sys.exit(1)
           PYTHON_YOUTUBE
           if python3 /tmp/subir_youtube.py; then echo "youtube_status=✅ YouTube OK" >> $GITHUB_OUTPUT; else echo "youtube_status=❌ YouTube Falló" >> $GITHUB_OUTPUT; fi
 
@@ -499,49 +361,35 @@ jobs:
           sys.stdout.reconfigure(encoding='utf-8')
 
           try:
-              client_key = os.environ.get('TIKTOK_CLIENT_KEY', '')
-              client_secret = os.environ.get('TIKTOK_CLIENT_SECRET', '')
-              refresh_token = os.environ.get('TIKTOK_REFRESH_TOKEN', '')
+              client_key, client_secret, refresh_token = os.environ.get('TIKTOK_CLIENT_KEY', ''), os.environ.get('TIKTOK_CLIENT_SECRET', ''), os.environ.get('TIKTOK_REFRESH_TOKEN', '')
               if not all([client_key, client_secret, refresh_token]): raise ValueError("Faltan secretos de TikTok")
 
               token_response = requests.post("https://open.tiktokapis.com/v2/oauth/token/", data={"client_key": client_key, "client_secret": client_secret, "grant_type": "refresh_token", "refresh_token": refresh_token}, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=30)
               if token_response.status_code != 200: raise Exception(f"HTTP {token_response.status_code}: {token_response.text}")
               
               token_data = token_response.json()
-              access_token = token_data['data'].get('access_token', '')
-              new_refresh_token = token_data['data'].get('refresh_token', refresh_token)
+              access_token, new_refresh_token = token_data['data'].get('access_token', ''), token_data['data'].get('refresh_token', refresh_token)
               
-              if new_refresh_token != refresh_token:
-                  subprocess.run(["gh", "secret", "set", "TIKTOK_REFRESH_TOKEN", "-b", new_refresh_token], check=False, capture_output=True)
+              if new_refresh_token != refresh_token: subprocess.run(["gh", "secret", "set", "TIKTOK_REFRESH_TOKEN", "-b", new_refresh_token], check=False, capture_output=True)
 
-              titulo = open('titulo.txt', 'r', encoding='utf-8').read().strip()[:100]
-              video_size = os.path.getsize('output.mp4')
+              titulo, video_size = open('titulo.txt', 'r', encoding='utf-8').read().strip()[:100], os.path.getsize('output.mp4')
 
               init_response = requests.post("https://open.tiktokapis.com/v2/post/publish/video/init/", headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json; charset=UTF-8"}, json={"post_info": {"title": titulo, "privacy_level": "PUBLIC_TO_EVERYONE", "disable_duet": False, "disable_comment": False, "disable_stitch": False}, "source_info": {"source": "FILE_UPLOAD", "video_size": video_size, "chunk_size": video_size, "total_chunk_count": 1}}, timeout=30)
-              
               if init_response.status_code != 200: raise Exception(f"Init falló: {init_response.text}")
-              init_data = init_response.json()
-              publish_id = init_data['data']['publish_id']
-              upload_url = init_data['data']['upload_url']
+              
+              upload_url, publish_id = init_response.json()['data']['upload_url'], init_response.json()['data']['publish_id']
 
               print(f"📤 Subiendo a TikTok...")
-              with open('output.mp4', 'rb') as video_file:
-                  upload_response = requests.put(upload_url, headers={"Content-Type": "video/mp4", "Content-Range": f"bytes 0-{video_size - 1}/{video_size}", "Content-Length": str(video_size)}, data=video_file.read(), timeout=300)
-              
+              upload_response = requests.put(upload_url, headers={"Content-Type": "video/mp4", "Content-Range": f"bytes 0-{video_size - 1}/{video_size}", "Content-Length": str(video_size)}, data=open('output.mp4', 'rb').read(), timeout=300)
               if upload_response.status_code not in [200, 201, 206]: raise Exception(f"Subida falló: {upload_response.text}")
 
               print("⏳ Verificando estado...")
-              for attempt in range(8):
+              for _ in range(8):
                   time.sleep(15)
-                  check_response = requests.post("https://open.tiktokapis.com/v2/post/publish/status/fetch/", headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json; charset=UTF-8"}, json={"publish_id": publish_id}, timeout=30)
-                  status = check_response.json().get('data', {}).get('status', 'UNKNOWN')
-                  if status == 'PUBLISH_COMPLETE':
-                      print("\n✅ VIDEO PUBLICADO EN TIKTOK")
-                      break
+                  status = requests.post("https://open.tiktokapis.com/v2/post/publish/status/fetch/", headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json; charset=UTF-8"}, json={"publish_id": publish_id}, timeout=30).json().get('data', {}).get('status', 'UNKNOWN')
+                  if status == 'PUBLISH_COMPLETE': print("\n✅ VIDEO PUBLICADO EN TIKTOK"); break
                   elif status in ['FAILED', 'ERROR']: raise Exception(f"TikTok rechazó el video")
-          except Exception as e:
-              print(f"\n❌ ERROR TIKTOK: {e}")
-              sys.exit(1)
+          except Exception as e: print(f"\n❌ ERROR TIKTOK: {e}"); sys.exit(1)
           PYTHON_TIKTOK
           if python3 /tmp/subir_tiktok.py; then echo "tiktok_status=✅ TikTok OK" >> $GITHUB_OUTPUT; else echo "tiktok_status=❌ TikTok Falló" >> $GITHUB_OUTPUT; fi
 
@@ -558,8 +406,7 @@ jobs:
           sys.stdout.reconfigure(encoding='utf-8')
 
           try:
-              access_token = os.environ.get('INSTAGRAM_ACCESS_TOKEN', '')
-              user_id = os.environ.get('INSTAGRAM_USER_ID', '')
+              access_token, user_id = os.environ.get('INSTAGRAM_ACCESS_TOKEN', ''), os.environ.get('INSTAGRAM_USER_ID', '')
               if not access_token or not user_id: raise ValueError("Faltan secretos de Instagram")
 
               hosting_services = [
@@ -572,24 +419,16 @@ jobs:
               for service in hosting_services:
                   try:
                       print(f"🔄 Intentando hosting en {service['name']}...")
-                      with open('output.mp4', 'rb') as video_file:
-                          response = requests.post(service['url'], files={service['field']: ('output.mp4', video_file, 'video/mp4')}, data=service.get('extra_params', {}), timeout=120)
+                      response = requests.post(service['url'], files={service['field']: ('output.mp4', open('output.mp4', 'rb'), 'video/mp4')}, data=service.get('extra_params', {}), timeout=120)
                       if response.status_code in [200, 201]:
-                          if service.get('is_text_response'):
-                              url = response.text.strip()
-                              if url.startswith('http'): video_public_url = url
-                          else:
-                              url = service['extract_url'](response.json())
-                              if url: video_public_url = url
-                      if video_public_url:
-                          print(f"✅ Video subido a {service['name']}: {video_public_url}")
-                          break
+                          video_public_url = response.text.strip() if service.get('is_text_response') else service['extract_url'](response.json())
+                          if video_public_url and video_public_url.startswith('http'): 
+                              print(f"✅ Video subido a {service['name']}: {video_public_url}"); break
                   except Exception as e: print(f"❌ Error en {service['name']}: {e}")
 
               if not video_public_url: raise Exception("Todos los servicios de hosting temporal fallaron")
 
               caption = open('titulo.txt', 'r', encoding='utf-8').read().strip()[:2200]
-              
               print("📦 Creando media container en Meta...")
               container_response = requests.post(f"https://graph.instagram.com/v21.0/{user_id}/media", data={'media_type': 'REELS', 'video_url': video_public_url, 'caption': caption, 'share_to_feed': True, 'access_token': access_token}, timeout=60).json()
               
@@ -597,10 +436,9 @@ jobs:
               container_id = container_response.get('id')
               
               print("⏳ Esperando procesamiento de Meta...")
-              for attempt in range(24):
+              for _ in range(24):
                   time.sleep(15)
-                  status_response = requests.get(f"https://graph.instagram.com/v21.0/{container_id}", params={'fields': 'status_code', 'access_token': access_token}, timeout=30).json()
-                  status_code = status_response.get('status_code', 'UNKNOWN')
+                  status_code = requests.get(f"https://graph.instagram.com/v21.0/{container_id}", params={'fields': 'status_code', 'access_token': access_token}, timeout=30).json().get('status_code', 'UNKNOWN')
                   print(f"  🔄 Estado: {status_code}")
                   if status_code == 'FINISHED': break
                   elif status_code == 'ERROR': raise Exception(f"Meta rechazó el video")
@@ -611,9 +449,7 @@ jobs:
               if 'error' in publish_response: raise Exception(f"Error publicando: {publish_response['error']}")
               print(f"✅ REEL PUBLICADO: https://www.instagram.com/p/{publish_response.get('id')}/")
 
-          except Exception as e:
-              print(f"\n❌ ERROR INSTAGRAM: {e}")
-              sys.exit(1)
+          except Exception as e: print(f"\n❌ ERROR INSTAGRAM: {e}"); sys.exit(1)
           PYTHON_INSTAGRAM
           if python3 /tmp/subir_instagram.py; then echo "instagram_status=✅ Instagram OK" >> $GITHUB_OUTPUT; else echo "instagram_status=❌ Instagram Falló" >> $GITHUB_OUTPUT; fi
 
