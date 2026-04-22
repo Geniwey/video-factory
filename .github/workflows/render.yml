@@ -1,7 +1,9 @@
 # ==============================================================================
-# 🚀 PIPELINE NUCLEAR v3.4 - DATO CRÍTICO - SISTEMA DE VIDEO AUTOMÁTICO
+# 🚀 PIPELINE NUCLEAR v4.0 - DATO CRÍTICO - SISTEMA DE VIDEO AUTOMÁTICO
 # ==============================================================================
-# VERSIÓN: 3.4.0 - SUBS ESTÁTICOS (SIN SALTOS) + NO MÁS VÍDEOS NEGROS
+# VERSIÓN: 4.0.0 - ESTILO "HORMOZI/TIKTOK" (ANIMACIÓN POP, 1-2 PALABRAS, CENTRADO)
+# DESCRIPCIÓN: Pipeline completo basado en v3.4 seguro. Con servidor estable,
+#              logs expansivos y motor de subtítulos para máxima retención.
 # ==============================================================================
 
 name: "Dato Critico - Pipeline Nuclear v3.0"
@@ -200,7 +202,7 @@ jobs:
           echo "video_duration=${DURACION_INT}" >> $GITHUB_OUTPUT
           rm -f audio_attempt1.mp3 audio_attempt2.mp3 audio_attempt3.mp3
 
-      - name: "💬 Generar subtítulos ESTÁTICOS perfectos"
+      - name: "💬 Generar subtítulos ANIMADOS (ESTILO RETENCIÓN VIRAL)"
         timeout-minutes: 15
         run: |
           python3 -c "
@@ -240,7 +242,12 @@ jobs:
           all_words = [{'word': clean_for_ass(w.get('word','')), 'start': w.get('start',0.0), 'end': w.get('end',0.0)} for s in data.get('segments',[]) for w in s.get('words',[]) if w.get('word','').strip() and w.get('end',0)>w.get('start',0)]
           font_name = os.environ.get('FONT_NAME', 'Montserrat Black')
 
-          # 🛡️ FIX SALTOS DE TEXTO: El WrapStyle ahora es 0 (smart wrapping)
+          # ==============================================================================
+          # LA MAGIA DE LA RETENCIÓN (ESTILO TIKTOK / HORMOZI)
+          # - Alignment 5 = EXACTAMENTE en el centro de la pantalla.
+          # - Fontsize 110 = Gigante para leerlo de reojo.
+          # - Colores = Amarillo puro con contorno negro de 8px y sombra de 5px.
+          # ==============================================================================
           ASS_HEADER = f"""[Script Info]
           ScriptType: v4.00+
           WrapStyle: 0
@@ -250,41 +257,52 @@ jobs:
 
           [V4+ Styles]
           Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-          Style: Default,{font_name},75,&H00FFFFFF,&H0000FFFF,&H00000000,&H88000000,-1,0,0,0,100,100,0,0,1,6,4,2,40,40,280,1
+          Style: Default,{font_name},110,&H0000FFFF,&H0000FFFF,&H00000000,&H99000000,-1,0,0,0,100,100,0,0,1,8,5,5,40,40,0,1
 
           [Events]
           Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
           """.replace('          ', '')
 
+          # AGRUPACIÓN RÁPIDA: 1 o 2 palabras máximo para que el ritmo sea frenético
+          chunks = []
+          current_chunk = []
+          char_count = 0
+
+          for i, word in enumerate(all_words):
+              w_text = fix_spanglish(word['word'])
+              current_chunk.append({'text': w_text, 'start': word['start'], 'end': word['end']})
+              char_count += len(w_text)
+
+              # Si ya tenemos 2 palabras, o la palabra es muy larga (>10 letras), o es el final: CORTAMOS EL CHUNK
+              if len(current_chunk) == 2 or char_count > 10 or i == len(all_words) - 1:
+                  chunks.append({
+                      'text': ' '.join(w['text'] for w in current_chunk),
+                      'start': current_chunk[0]['start'],
+                      'end': current_chunk[-1]['end']
+                  })
+                  current_chunk = []
+                  char_count = 0
+
           dialogue_lines = []
-          for group_start_idx in range(0, len(all_words), 3):
-              group = all_words[group_start_idx:group_start_idx + 3]
-              if not group: continue
+          for i, chunk in enumerate(chunks):
+              line_start = chunk['start']
+              
+              # CONTINUIDAD PERFECTA (El final de esta caja es el inicio exacto de la siguiente)
+              if i < len(chunks) - 1:
+                  line_end = chunks[i+1]['start']
+              else:
+                  line_end = chunk['end'] + 0.1
+              
+              # LA ANIMACIÓN "POP": La palabra nace en tamaño 70% y escala de golpe al 100% en 120ms
+              anim_tag = r'{\fscx70\fscy70\t(0,120,\fscx100\fscy100)}'
+              
+              line_text = f"{anim_tag}{chunk['text']}"
 
-              for active_word_idx, active_word in enumerate(group):
-                  line_start = active_word['start']
-                  
-                  if active_word_idx < len(group) - 1:
-                      line_end = group[active_word_idx + 1]['start']
-                  else:
-                      line_end = active_word['end'] + 0.1
-                      if group_start_idx + 3 < len(all_words): 
-                          line_end = min(line_end, all_words[group_start_idx + 3]['start'])
-                  
-                  text_parts = []
-                  for word_idx, word in enumerate(group):
-                      word_text = fix_spanglish(word['word'])
-                      if word_idx == active_word_idx: 
-                          # 🛡️ FIX SALTOS DE TEXTO: Hemos quitado el \fscx112 que cambiaba el tamaño
-                          # Ahora la caja de texto NO CAMBIA DE ANCHO, por lo que no tiembla ni salta.
-                          text_parts.append(r'{\c&H0000E6FF&}' + word_text + r'{\c&H00FFFFFF&}')
-                      else: 
-                          text_parts.append(word_text)
+              if line_start < line_end:
+                  dialogue_lines.append(f"Dialogue: 0,{format_time_ass(line_start)},{format_time_ass(line_end)},Default,,0,0,0,,{line_text}")
 
-                  if line_start < line_end:
-                      dialogue_lines.append(f"Dialogue: 0,{format_time_ass(line_start)},{format_time_ass(line_end)},Default,,0,0,0,,{' '.join(text_parts)}")
-
-          with open('subtitles.ass', 'w', encoding='utf-8') as f: f.write(ASS_HEADER + '\n' + '\n'.join(dialogue_lines))
+          with open('subtitles.ass', 'w', encoding='utf-8') as f: 
+              f.write(ASS_HEADER + '\n' + '\n'.join(dialogue_lines))
           PYTHON_SUBTITULOS
 
           python3 /tmp/gen_subtitulos.py
