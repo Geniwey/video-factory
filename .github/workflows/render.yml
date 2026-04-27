@@ -1,9 +1,9 @@
 # ==============================================================================
-# 🚀 PIPELINE NUCLEAR v4.0 - DATO CRÍTICO - SISTEMA DE VIDEO AUTOMÁTICO
+# 🚀 PIPELINE NUCLEAR v4.1 - DATO CRÍTICO - SISTEMA DE VIDEO AUTOMÁTICO
 # ==============================================================================
-# VERSIÓN: 4.0.0 - ESTILO "HORMOZI/TIKTOK" (ANIMACIÓN POP, 1-2 PALABRAS, CENTRADO)
-# DESCRIPCIÓN: Pipeline completo basado en v3.4 seguro. Con servidor estable,
-#              logs expansivos y motor de subtítulos para máxima retención.
+# VERSIÓN: 4.1.0 - EFECTO KEN BURNS (ZOOM CONTINUO) + RETENCIÓN VISUAL
+# DESCRIPCIÓN: Pipeline completo con servidor estable y filtro de FFmpeg
+#              para evitar "Síndrome de Screensaver". Movimiento perpetuo.
 # ==============================================================================
 
 name: "Dato Critico - Pipeline Nuclear v3.0"
@@ -173,7 +173,6 @@ jobs:
 
           if [ "$VIDEO_OK" = "false" ]; then
             echo "⚠️ No se pudo obtener el video original. Generando fondo de reemplazo brillante..."
-            # FIX COLOR NEGRO: Cambiado de 0x0a0e27 (casi negro) a 0x1a2b4c (azul oscuro visible)
             ffmpeg -y -f lavfi -i "color=c=0x1a2b4c:s=1080x1920:d=120:r=30" -vf "vignette=PI/2.5,noise=alls=8:allf=t+u,eq=brightness=-0.02:contrast=1.1:saturation=1.2" -c:v libx264 -preset ultrafast -crf 20 -pix_fmt yuv420p -t 120 pexels.mp4 2>/dev/null
           fi
           rm -f pexels_raw.mp4
@@ -242,12 +241,6 @@ jobs:
           all_words = [{'word': clean_for_ass(w.get('word','')), 'start': w.get('start',0.0), 'end': w.get('end',0.0)} for s in data.get('segments',[]) for w in s.get('words',[]) if w.get('word','').strip() and w.get('end',0)>w.get('start',0)]
           font_name = os.environ.get('FONT_NAME', 'Montserrat Black')
 
-          # ==============================================================================
-          # LA MAGIA DE LA RETENCIÓN (ESTILO TIKTOK / HORMOZI)
-          # - Alignment 5 = EXACTAMENTE en el centro de la pantalla.
-          # - Fontsize 110 = Gigante para leerlo de reojo.
-          # - Colores = Amarillo puro con contorno negro de 8px y sombra de 5px.
-          # ==============================================================================
           ASS_HEADER = f"""[Script Info]
           ScriptType: v4.00+
           WrapStyle: 0
@@ -263,7 +256,6 @@ jobs:
           Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
           """.replace('          ', '')
 
-          # AGRUPACIÓN RÁPIDA: 1 o 2 palabras máximo para que el ritmo sea frenético
           chunks = []
           current_chunk = []
           char_count = 0
@@ -273,7 +265,6 @@ jobs:
               current_chunk.append({'text': w_text, 'start': word['start'], 'end': word['end']})
               char_count += len(w_text)
 
-              # Si ya tenemos 2 palabras, o la palabra es muy larga (>10 letras), o es el final: CORTAMOS EL CHUNK
               if len(current_chunk) == 2 or char_count > 10 or i == len(all_words) - 1:
                   chunks.append({
                       'text': ' '.join(w['text'] for w in current_chunk),
@@ -287,15 +278,12 @@ jobs:
           for i, chunk in enumerate(chunks):
               line_start = chunk['start']
               
-              # CONTINUIDAD PERFECTA (El final de esta caja es el inicio exacto de la siguiente)
               if i < len(chunks) - 1:
                   line_end = chunks[i+1]['start']
               else:
                   line_end = chunk['end'] + 0.1
               
-              # LA ANIMACIÓN "POP": La palabra nace en tamaño 70% y escala de golpe al 100% en 120ms
               anim_tag = r'{\fscx70\fscy70\t(0,120,\fscx100\fscy100)}'
-              
               line_text = f"{anim_tag}{chunk['text']}"
 
               if line_start < line_end:
@@ -307,16 +295,17 @@ jobs:
 
           python3 /tmp/gen_subtitulos.py
 
-      - name: "🎬 Renderizar video final"
+      - name: "🎬 Renderizar video final (CON ZOOM CONTINUO)"
         timeout-minutes: 20
         run: |
           DUR=$(cat dur.txt)
           ASS_PATH=$(realpath subtitles.ass)
           ASS_PATH_ESCAPED=$(echo "$ASS_PATH" | sed 's/:/\\:/g')
 
+          # 🛡️ MAGIA DE EDICIÓN: El filtro 'zoompan' obliga a la cámara a acercarse lentamente, matando los planos estáticos.
           ffmpeg -y \
             -stream_loop -1 -i pexels.mp4 -i audio.wav \
-            -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,eq=brightness=-0.05:saturation=1.1:contrast=1.05[bg];[bg]subtitles='${ASS_PATH_ESCAPED}':fontsdir=~/.fonts[vwithsubs];[vwithsubs]drawbox=x=0:y=0:w='min(iw\,iw*t/${DUR})':h=10:color=0xFFD700@0.9:t=fill[outv]" \
+            -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,zoompan=z='min(max(zoom\,pzoom)+0.0005\,1.3)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,eq=brightness=-0.05:saturation=1.1:contrast=1.05[bg];[bg]subtitles='${ASS_PATH_ESCAPED}':fontsdir=~/.fonts[vwithsubs];[vwithsubs]drawbox=x=0:y=0:w='min(iw\,iw*t/${DUR})':h=10:color=0xFFD700@0.9:t=fill[outv]" \
             -map "[outv]" -map 1:a -c:v libx264 -preset fast -crf 22 -pix_fmt yuv420p -c:a aac -b:a 192k -t "$DUR" -movflags +faststart output.mp4 \
             2>&1 | tee ffmpeg_output.log | tail -20
 
