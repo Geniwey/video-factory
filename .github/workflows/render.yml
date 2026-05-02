@@ -485,7 +485,7 @@ jobs:
           PYTHON_TIKTOK
           if python3 /tmp/subir_tiktok.py; then echo "tiktok_status=✅ TikTok OK" >> $GITHUB_OUTPUT; else echo "tiktok_status=❌ TikTok Falló" >> $GITHUB_OUTPUT; fi
 
-      - name: "📷 Publicar en Instagram (nuevos hostings anti-bloqueo)"
+      - name: "📷 Publicar en Instagram (Servidores VIP Anti-Meta Block)"
         id: instagram
         continue-on-error: true
         timeout-minutes: 12
@@ -510,17 +510,18 @@ jobs:
                   print("❌ Error: Faltan secretos de Instagram.")
                   sys.exit(1)
 
+              # Solo hostings permitidos por los crawlers de Meta
               hosting_services = [
-                  {
-                      'name': 'Litterbox', 
-                      'url': 'https://litterbox.catbox.moe/resources/internals/api.php', 
-                      'file_field': 'fileToUpload',
-                      'data': {'reqtype': 'fileupload', 'time': '24h'},
-                      'parse': lambda r: r.text.strip() if r.text.startswith('http') else None
-                  },
                   {
                       'name': 'Uguu.se',
                       'url': 'https://uguu.se/upload',
+                      'file_field': 'files[]',
+                      'data': {},
+                      'parse': lambda r: r.json().get('files', [{}])[0].get('url')
+                  },
+                  {
+                      'name': 'Pomf.lain',
+                      'url': 'https://pomf.lain.la/upload.php',
                       'file_field': 'files[]',
                       'data': {},
                       'parse': lambda r: r.json().get('files', [{}])[0].get('url')
@@ -558,7 +559,7 @@ jobs:
               container_response = requests.post(f"https://graph.instagram.com/v21.0/{user_id}/media", data={'media_type': 'REELS', 'video_url': video_public_url, 'caption': caption, 'share_to_feed': True, 'access_token': access_token}, timeout=60).json()
               
               if 'error' in container_response: 
-                  print(f"❌ Error de Meta API: {container_response['error']}")
+                  print(f"❌ Error de Meta API al crear contenedor: {container_response['error']}")
                   sys.exit(1)
                   
               container_id = container_response.get('id')
@@ -572,7 +573,7 @@ jobs:
                   elif status == 'ERROR': sys.exit(1)
               
               publish = requests.post(f"https://graph.instagram.com/v21.0/{user_id}/media_publish", data={'creation_id': container_id, 'access_token': access_token}).json()
-              print(f"✅ REEL PUBLICADO: https://www.instagram.com/p/{publish.get('id')}/")
+              print(f"✅ REEL PUBLICADO CON ÉXITO: https://www.instagram.com/p/{publish.get('id')}/")
 
           except Exception as e: 
               print("\n❌ ERROR GENERAL INSTAGRAM:")
