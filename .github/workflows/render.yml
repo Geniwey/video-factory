@@ -1,9 +1,7 @@
 # ==============================================================================
-# 🚀 PIPELINE NUCLEAR v4.1 - DATO CRÍTICO - SISTEMA DE VIDEO AUTOMÁTICO
+# 🚀 PIPELINE NUCLEAR v4.3 - DATO CRÍTICO - SISTEMA DE VIDEO AUTOMÁTICO
 # ==============================================================================
-# VERSIÓN: 4.1.0 - EFECTO KEN BURNS (ZOOM CONTINUO) + RETENCIÓN VISUAL
-# DESCRIPCIÓN: Pipeline completo con servidor estable y filtro de FFmpeg
-#              para evitar "Síndrome de Screensaver". Movimiento perpetuo.
+# VERSIÓN: 4.3.0 - GITHUB S3 CDN (ANTI-BLOQUEOS META)
 # ==============================================================================
 
 name: "Dato Critico - Pipeline Nuclear v3.0"
@@ -18,7 +16,6 @@ env:
   PYTHONLEGACYWINDOWSSTDIO: "utf-8"
   LANG: "C.UTF-8"
   LC_ALL: "C.UTF-8"
-  FFREPORT: "file=ffmpeg_report.log:level=40"
   WORK_DIR: "/home/runner/work_pipeline"
 
 on:
@@ -151,7 +148,7 @@ jobs:
           TITULO_CORTO=$(python3 -c "print(open('titulo_corto.txt', encoding='utf-8').read().strip())" 2>/dev/null || echo "Video sin título")
           echo "titulo_corto=${TITULO_CORTO}" >> $GITHUB_OUTPUT
 
-      - name: "🎙️ Descargar video y generar audio (triple fallback)"
+      - name: "🎙️ Descargar video y generar audio (Triple fallback + FFmpeg seguro)"
         id: audio_gen
         timeout-minutes: 8
         run: |
@@ -161,19 +158,17 @@ jobs:
           echo "Intentando descargar video desde: $VIDEO_URL"
 
           if [ -n "$VIDEO_URL" ] && [ "$VIDEO_URL" != "null" ] && [ "$VIDEO_URL" != "undefined" ]; then
-            # Descarga mejorada fingiendo ser un navegador Windows para evitar bloqueos 403
             curl -L --max-time 60 --retry 3 --connect-timeout 15 -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -o pexels_raw.mp4 "$VIDEO_URL" 2>/dev/null || true
             
             if [ -s "pexels_raw.mp4" ] && [ "$(stat -c%s pexels_raw.mp4)" -gt 50000 ]; then
-              CODEC=$(ffprobe -v quiet -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 pexels_raw.mp4 2>/dev/null || echo "unknown")
               ffmpeg -y -i pexels_raw.mp4 -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1" -c:v libx264 -preset ultrafast -crf 23 -pix_fmt yuv420p -an pexels.mp4 2>/dev/null || true
               if [ -s "pexels.mp4" ]; then VIDEO_OK=true; fi
             fi
           fi
 
           if [ "$VIDEO_OK" = "false" ]; then
-            echo "⚠️ No se pudo obtener el video original. Generando fondo de reemplazo brillante..."
-            ffmpeg -y -f lavfi -i "color=c=0x1a2b4c:s=1080x1920:d=120:r=30" -vf "vignette=PI/2.5,noise=alls=8:allf=t+u,eq=brightness=-0.02:contrast=1.1:saturation=1.2" -c:v libx264 -preset ultrafast -crf 20 -pix_fmt yuv420p -t 120 pexels.mp4 2>/dev/null
+            echo "⚠️ No se pudo obtener el video original. Generando fondo de reemplazo seguro..."
+            ffmpeg -y -f lavfi -i "color=c=black:s=1080x1920:d=120:r=30" -c:v libx264 -preset ultrafast -crf 20 -pix_fmt yuv420p pexels.mp4 2>/dev/null
           fi
           rm -f pexels_raw.mp4
 
@@ -201,7 +196,7 @@ jobs:
           echo "video_duration=${DURACION_INT}" >> $GITHUB_OUTPUT
           rm -f audio_attempt1.mp3 audio_attempt2.mp3 audio_attempt3.mp3
 
-      - name: "💬 Generar subtítulos ANIMADOS (ESTILO RETENCIÓN VIRAL)"
+      - name: "💬 Generar subtítulos ANIMADOS"
         timeout-minutes: 15
         run: |
           python3 -c "
@@ -295,21 +290,23 @@ jobs:
 
           python3 /tmp/gen_subtitulos.py
 
-      - name: "🎬 Renderizar video final (CON ZOOM CONTINUO)"
+      - name: "🎬 Renderizar video final"
         timeout-minutes: 20
         run: |
           DUR=$(cat dur.txt)
           ASS_PATH=$(realpath subtitles.ass)
           ASS_PATH_ESCAPED=$(echo "$ASS_PATH" | sed 's/:/\\:/g')
 
-          # 🛡️ MAGIA DE EDICIÓN: El filtro 'zoompan' obliga a la cámara a acercarse lentamente, matando los planos estáticos.
           ffmpeg -y \
             -stream_loop -1 -i pexels.mp4 -i audio.wav \
             -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,zoompan=z='min(max(zoom\,pzoom)+0.0005\,1.3)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,eq=brightness=-0.05:saturation=1.1:contrast=1.05[bg];[bg]subtitles='${ASS_PATH_ESCAPED}':fontsdir=~/.fonts[vwithsubs];[vwithsubs]drawbox=x=0:y=0:w='min(iw\,iw*t/${DUR})':h=10:color=0xFFD700@0.9:t=fill[outv]" \
-            -map "[outv]" -map 1:a -c:v libx264 -preset fast -crf 22 -pix_fmt yuv420p -c:a aac -b:a 192k -t "$DUR" -movflags +faststart output.mp4 \
+            -map "[outv]" -map 1:a -c:v libx264 -preset fast -crf 22 -pix_fmt yuv420p -r 30 -c:a aac -b:a 192k -t "$DUR" -movflags +faststart output.mp4 \
             2>&1 | tee ffmpeg_output.log | tail -20
 
-          if [ ! -f "output.mp4" ] || [ "$(stat -c%s output.mp4)" -lt 100000 ]; then exit 1; fi
+          if [ ! -f "output.mp4" ] || [ "$(stat -c%s output.mp4)" -lt 100000 ]; then 
+            echo "❌ Error Crítico: FFmpeg generó un archivo corrupto o muy pequeño."
+            exit 1
+          fi
 
       - name: "📺 Publicar en YouTube"
         id: youtube
@@ -485,14 +482,28 @@ jobs:
           PYTHON_TIKTOK
           if python3 /tmp/subir_tiktok.py; then echo "tiktok_status=✅ TikTok OK" >> $GITHUB_OUTPUT; else echo "tiktok_status=❌ TikTok Falló" >> $GITHUB_OUTPUT; fi
 
-      - name: "📷 Publicar en Instagram (Servidores VIP Anti-Meta Block)"
+      - name: "📷 Publicar en Instagram (GitHub S3 CDN VIP)"
         id: instagram
         continue-on-error: true
         timeout-minutes: 12
         env:
           INSTAGRAM_ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
           INSTAGRAM_USER_ID: ${{ secrets.INSTAGRAM_USER_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_NAME: ${{ github.repository }}
         run: |
+          echo "☁️ Subiendo video a GitHub Releases (Servidor S3 VIP anti-bloqueos)..."
+          
+          # Crear release temporal si no existe
+          gh release view ig-cdn >/dev/null 2>&1 || gh release create ig-cdn --title "IG CDN" --notes "Almacenamiento temporal VIP para Meta"
+          
+          # Subir el video sobreescribiendo el anterior (para no ocupar espacio extra)
+          gh release upload ig-cdn output.mp4 --clobber
+          
+          # Construir la URL de descarga directa de Amazon S3
+          VIDEO_PUBLIC_URL="https://github.com/${REPO_NAME}/releases/download/ig-cdn/output.mp4"
+          echo "✅ URL generada: $VIDEO_PUBLIC_URL"
+          
           cat << 'PYTHON_INSTAGRAM' > /tmp/subir_instagram.py
           import os
           import sys
@@ -505,57 +516,15 @@ jobs:
           try:
               access_token = os.environ.get('INSTAGRAM_ACCESS_TOKEN', '')
               user_id = os.environ.get('INSTAGRAM_USER_ID', '')
+              video_public_url = os.environ.get('VIDEO_PUBLIC_URL', '')
               
               if not access_token or not user_id: 
                   print("❌ Error: Faltan secretos de Instagram.")
                   sys.exit(1)
 
-              # Solo hostings permitidos por los crawlers de Meta
-              hosting_services = [
-                  {
-                      'name': 'Uguu.se',
-                      'url': 'https://uguu.se/upload',
-                      'file_field': 'files[]',
-                      'data': {},
-                      'parse': lambda r: r.json().get('files', [{}])[0].get('url')
-                  },
-                  {
-                      'name': 'Pomf.lain',
-                      'url': 'https://pomf.lain.la/upload.php',
-                      'file_field': 'files[]',
-                      'data': {},
-                      'parse': lambda r: r.json().get('files', [{}])[0].get('url')
-                  }
-              ]
-
-              video_public_url = None
-              for service in hosting_services:
-                  try:
-                      print(f"🔄 Intentando hosting en {service['name']}...")
-                      with open('output.mp4', 'rb') as f:
-                          response = requests.post(
-                              service['url'], 
-                              files={service['file_field']: ('output.mp4', f, 'video/mp4')}, 
-                              data=service['data'], 
-                              timeout=120
-                          )
-                      url = service['parse'](response)
-                      if url:
-                          video_public_url = url
-                          print(f"✅ Subido temporalmente a: {video_public_url}")
-                          break
-                      else:
-                          print(f"⚠️ {service['name']} no devolvió URL. Respuesta: {response.text[:100]}")
-                  except Exception as e: 
-                      print(f"❌ Falló {service['name']}: {e}")
-
-              if not video_public_url: 
-                  print("❌ TODOS los hostings fallaron.")
-                  sys.exit(1)
-
               caption = open('titulo.txt', 'r', encoding='utf-8').read().strip()[:2200]
               
-              print("📦 Creando media container en Meta...")
+              print("📦 Creando media container en Meta desde la URL VIP de S3...")
               container_response = requests.post(f"https://graph.instagram.com/v21.0/{user_id}/media", data={'media_type': 'REELS', 'video_url': video_public_url, 'caption': caption, 'share_to_feed': True, 'access_token': access_token}, timeout=60).json()
               
               if 'error' in container_response: 
@@ -564,13 +533,19 @@ jobs:
                   
               container_id = container_response.get('id')
               
-              print(f"⏳ Esperando procesamiento de Meta...")
+              print("⏳ Esperando procesamiento de Meta...")
               for _ in range(24):
                   time.sleep(15)
-                  status = requests.get(f"https://graph.instagram.com/v21.0/{container_id}", params={'fields': 'status_code', 'access_token': access_token}).json().get('status_code', 'UNKNOWN')
+                  status_response = requests.get(f"https://graph.instagram.com/v21.0/{container_id}", params={'fields': 'status_code,status_info', 'access_token': access_token}).json()
+                  status = status_response.get('status_code', 'UNKNOWN')
                   print(f"  🔄 Estado actual en Meta: {status}")
-                  if status == 'FINISHED': break
-                  elif status == 'ERROR': sys.exit(1)
+                  
+                  if status == 'FINISHED': 
+                      break
+                  elif status == 'ERROR': 
+                      error_detail = status_response.get('status_info', 'Razón desconocida')
+                      print(f"❌ Meta rechazó el video. Detalle exacto: {error_detail}")
+                      sys.exit(1)
               
               publish = requests.post(f"https://graph.instagram.com/v21.0/{user_id}/media_publish", data={'creation_id': container_id, 'access_token': access_token}).json()
               print(f"✅ REEL PUBLICADO CON ÉXITO: https://www.instagram.com/p/{publish.get('id')}/")
@@ -580,6 +555,8 @@ jobs:
               traceback.print_exc()
               sys.exit(1)
           PYTHON_INSTAGRAM
+          
+          export VIDEO_PUBLIC_URL=$VIDEO_PUBLIC_URL
           if python3 /tmp/subir_instagram.py; then echo "instagram_status=✅ Instagram OK" >> $GITHUB_OUTPUT; else echo "instagram_status=❌ Instagram Falló" >> $GITHUB_OUTPUT; fi
 
       - name: "📦 Subir artifacts de diagnóstico"
