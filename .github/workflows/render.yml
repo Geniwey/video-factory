@@ -485,7 +485,7 @@ jobs:
           PYTHON_TIKTOK
           if python3 /tmp/subir_tiktok.py; then echo "tiktok_status=✅ TikTok OK" >> $GITHUB_OUTPUT; else echo "tiktok_status=❌ TikTok Falló" >> $GITHUB_OUTPUT; fi
 
-      - name: "📷 Publicar en Instagram (triple hosting fallback)"
+      - name: "📷 Publicar en Instagram (nuevos hostings anti-bloqueo)"
         id: instagram
         continue-on-error: true
         timeout-minutes: 12
@@ -511,36 +511,45 @@ jobs:
                   sys.exit(1)
 
               hosting_services = [
-                  {'name': 'file.io', 'url': 'https://file.io', 'field': 'file', 'extra_params': {'expires': '1d'}, 'extract_url': lambda r: r.get('link')},
-                  {'name': 'tmpfiles.org', 'url': 'https://tmpfiles.org/api/v1/upload', 'field': 'file', 'extra_params': {}, 'extract_url': lambda r: (r.get('data', {}).get('url', '').replace('tmpfiles.org/', 'tmpfiles.org/dl/') or None)},
-                  {'name': '0x0.st', 'url': 'https://0x0.st', 'field': 'file', 'extra_params': {}, 'extract_url': lambda r: None, 'is_text_response': True},
+                  {
+                      'name': 'Litterbox', 
+                      'url': 'https://litterbox.catbox.moe/resources/internals/api.php', 
+                      'file_field': 'fileToUpload',
+                      'data': {'reqtype': 'fileupload', 'time': '24h'},
+                      'parse': lambda r: r.text.strip() if r.text.startswith('http') else None
+                  },
+                  {
+                      'name': 'Uguu.se',
+                      'url': 'https://uguu.se/upload',
+                      'file_field': 'files[]',
+                      'data': {},
+                      'parse': lambda r: r.json().get('files', [{}])[0].get('url')
+                  }
               ]
 
               video_public_url = None
               for service in hosting_services:
                   try:
-                      print(f"🔄 Intentando hosting temporal en {service['name']}...")
+                      print(f"🔄 Intentando hosting en {service['name']}...")
                       with open('output.mp4', 'rb') as f:
-                          response = requests.post(service['url'], files={service['field']: ('output.mp4', f, 'video/mp4')}, data=service.get('extra_params', {}), timeout=120)
-                      
-                      if response.status_code in [200, 201]:
-                          if service.get('is_text_response'):
-                              url = response.text.strip()
-                              if url.startswith('http'): video_public_url = url
-                          else:
-                              url = service['extract_url'](response.json())
-                              if url: video_public_url = url
-                              
-                      if video_public_url:
-                          print(f"✅ Video subido temporalmente a {service['name']}: {video_public_url}")
+                          response = requests.post(
+                              service['url'], 
+                              files={service['file_field']: ('output.mp4', f, 'video/mp4')}, 
+                              data=service['data'], 
+                              timeout=120
+                          )
+                      url = service['parse'](response)
+                      if url:
+                          video_public_url = url
+                          print(f"✅ Subido temporalmente a: {video_public_url}")
                           break
                       else:
-                          print(f"⚠️ {service['name']} no devolvió una URL válida. Response: {response.text[:100]}")
+                          print(f"⚠️ {service['name']} no devolvió URL. Respuesta: {response.text[:100]}")
                   except Exception as e: 
-                      print(f"❌ Falló el hosting {service['name']}: {e}")
+                      print(f"❌ Falló {service['name']}: {e}")
 
               if not video_public_url: 
-                  print("❌ TODOS los servicios de hosting temporal fallaron. No se puede enviar a Meta.")
+                  print("❌ TODOS los hostings fallaron.")
                   sys.exit(1)
 
               caption = open('titulo.txt', 'r', encoding='utf-8').read().strip()[:2200]
@@ -549,32 +558,21 @@ jobs:
               container_response = requests.post(f"https://graph.instagram.com/v21.0/{user_id}/media", data={'media_type': 'REELS', 'video_url': video_public_url, 'caption': caption, 'share_to_feed': True, 'access_token': access_token}, timeout=60).json()
               
               if 'error' in container_response: 
-                  print(f"❌ Error de Meta API al crear contenedor: {container_response['error']}")
+                  print(f"❌ Error de Meta API: {container_response['error']}")
                   sys.exit(1)
                   
               container_id = container_response.get('id')
               
-              print(f"⏳ Esperando procesamiento de Meta (Container ID: {container_id})...")
-              for attempt in range(24):
+              print(f"⏳ Esperando procesamiento de Meta...")
+              for _ in range(24):
                   time.sleep(15)
-                  status_response = requests.get(f"https://graph.instagram.com/v21.0/{container_id}", params={'fields': 'status_code', 'access_token': access_token}, timeout=30).json()
-                  status_code = status_response.get('status_code', 'UNKNOWN')
-                  print(f"  🔄 Estado actual en Meta: {status_code}")
-                  
-                  if status_code == 'FINISHED': 
-                      break
-                  elif status_code == 'ERROR': 
-                      print("❌ Meta rechazó el video por formato, copyright o URL inaccesible.")
-                      sys.exit(1)
+                  status = requests.get(f"https://graph.instagram.com/v21.0/{container_id}", params={'fields': 'status_code', 'access_token': access_token}).json().get('status_code', 'UNKNOWN')
+                  print(f"  🔄 Estado actual en Meta: {status}")
+                  if status == 'FINISHED': break
+                  elif status == 'ERROR': sys.exit(1)
               
-              print("📢 Ordenando publicación final del Reel...")
-              publish_response = requests.post(f"https://graph.instagram.com/v21.0/{user_id}/media_publish", data={'creation_id': container_id, 'access_token': access_token}, timeout=60).json()
-              
-              if 'error' in publish_response: 
-                  print(f"❌ Error al publicar en Meta: {publish_response['error']}")
-                  sys.exit(1)
-                  
-              print(f"✅ REEL PUBLICADO CON ÉXITO: https://www.instagram.com/p/{publish_response.get('id')}/")
+              publish = requests.post(f"https://graph.instagram.com/v21.0/{user_id}/media_publish", data={'creation_id': container_id, 'access_token': access_token}).json()
+              print(f"✅ REEL PUBLICADO: https://www.instagram.com/p/{publish.get('id')}/")
 
           except Exception as e: 
               print("\n❌ ERROR GENERAL INSTAGRAM:")
