@@ -59,6 +59,8 @@ jobs:
 
       - name: "🛠️ Instalar dependencias del sistema"
         timeout-minutes: 8
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           echo "=============================================="
           echo "📦 INSTALANDO DEPENDENCIAS DEL SISTEMA"
@@ -66,7 +68,8 @@ jobs:
 
           sudo apt-get update -qq 2>&1 | tail -5 || true
 
-          sudo apt-get install -y -qq \
+          # CORRECCIÓN: Instalación desatendida y sin paquetes recomendados
+          sudo apt-get install -yq --no-install-recommends \
             ffmpeg bc file wget curl fonts-liberation libnss3 libatk-bridge2.0-0 libgbm1 fontconfig \
             2>&1 | grep -E "(error|Error|ERROR)" || true
 
@@ -133,15 +136,34 @@ jobs:
               if not text or len(text.strip()) < 3: return default_value
               return text.strip()[:max_length]
 
-          titulo = validate_and_limit(clean_invisible_chars(repair_encoding(os.environ.get('TITULO_RAW', ''))), 100, "🚀 Noticia Tech del Momento")
-          descripcion = validate_and_limit(clean_invisible_chars(repair_encoding(os.environ.get('DESCRIPCION_RAW', ''))), 5000, "#tech #noticias #shorts")
-          script_text = validate_and_limit(clean_invisible_chars(repair_encoding(os.environ.get('SCRIPT_RAW', ''))), 5000, "Esto cambia todo lo que conocías. Sigue viendo.")
+          # CORRECCIÓN: Filtro "Antierrores" para los nombres técnicos
+          def aplicar_diccionario(text):
+              if not text: return text
+              diccionario = {
+                  "Claude Mitos": "Claude 3 Opus",
+                  "chat GPT": "ChatGPT",
+                  "Open A I": "OpenAI",
+                  "Yutub": "YouTube"
+              }
+              for err, corr in diccionario.items():
+                  text = text.replace(err, corr)
+              return text
+
+          # Aplicamos limpieza + filtro de diccionario a los textos
+          titulo_limpio = clean_invisible_chars(repair_encoding(os.environ.get('TITULO_RAW', '')))
+          titulo = validate_and_limit(aplicar_diccionario(titulo_limpio), 100, "🚀 Noticia Tech del Momento")
+
+          desc_limpia = clean_invisible_chars(repair_encoding(os.environ.get('DESCRIPCION_RAW', '')))
+          descripcion = validate_and_limit(aplicar_diccionario(desc_limpia), 5000, "#tech #noticias #shorts")
+
+          script_limpio = clean_invisible_chars(repair_encoding(os.environ.get('SCRIPT_RAW', '')))
+          script_text = validate_and_limit(aplicar_diccionario(script_limpio), 5000, "Esto cambia todo lo que conocías. Sigue viendo.")
 
           with open('titulo.txt', 'w', encoding='utf-8') as f: f.write(titulo)
           with open('descripcion.txt', 'w', encoding='utf-8') as f: f.write(descripcion)
           with open('script.txt', 'w', encoding='utf-8') as f: f.write(script_text)
           with open('titulo_corto.txt', 'w', encoding='utf-8') as f: f.write(titulo[:50])
-          print("✅ EXTRACCIÓN COMPLETADA")
+          print("✅ EXTRACCIÓN Y FILTRADO COMPLETADO")
           PYTHON_EXTRAER
 
           python3 /tmp/extraer_textos.py
@@ -244,14 +266,27 @@ jobs:
           fi
 
           if [ "$AUDIO_OK" = "false" ]; then ffmpeg -y -f lavfi -i "sine=frequency=440:duration=30" -c:a libmp3lame -b:a 128k audio.mp3 2>/dev/null || true; fi
-          ffmpeg -y -i audio.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null
+          
+          # Convertimos primero la voz sola a wav
+          ffmpeg -y -i audio.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio_voz.wav 2>/dev/null
+          
+          # CORRECCIÓN: Mezcla de música de fondo (requiere que tengas musica_tension.mp3 en el root de GitHub)
+          if [ -f "musica_tension.mp3" ]; then
+            echo "🎵 Mezclando voz con música de tensión..."
+            # Mezclamos la voz con la música en bucle al 8% de volumen
+            ffmpeg -y -i audio_voz.wav -stream_loop -1 -i musica_tension.mp3 -filter_complex "[1:a]volume=0.08[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[a]" -map "[a]" -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null
+          else
+            echo "⚠️ No se encontró 'musica_tension.mp3' en el repositorio. Usando solo la voz."
+            mv audio_voz.wav audio.wav
+          fi
+
           if [ ! -s "audio.wav" ]; then exit 1; fi
 
           DURACION=$(ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 audio.wav 2>/dev/null || echo "30")
           DURACION_INT=$(python3 -c "print(f'{max(10, min(180, float(\"$DURACION\"))):.2f}')")
           echo "$DURACION_INT" > dur.txt
           echo "video_duration=${DURACION_INT}" >> $GITHUB_OUTPUT
-          rm -f audio_attempt1.mp3 audio_attempt2.mp3 audio_attempt3.mp3
+          rm -f audio_attempt1.mp3 audio_attempt2.mp3 audio_attempt3.mp3 audio_voz.wav
 
       - name: "💬 Generar subtítulos ANIMADOS"
         timeout-minutes: 15
@@ -595,7 +630,7 @@ jobs:
                   time.sleep(15)
                   status_response = requests.get(f"https://graph.instagram.com/v21.0/{container_id}", params={'fields': 'status_code,status_info', 'access_token': access_token}).json()
                   status = status_response.get('status_code', 'UNKNOWN')
-                  print(f"  🔄 Estado actual en Meta: {status}")
+                  print(f"   🔄 Estado actual en Meta: {status}")
                   
                   if status == 'FINISHED': 
                       break
