@@ -1,7 +1,7 @@
 # ==============================================================================
-# 🚀 PIPELINE NUCLEAR v4.4 - DATO CRÍTICO - SISTEMA DE VIDEO AUTOMÁTICO
+# 🚀 PIPELINE NUCLEAR v4.4.1 - DATO CRÍTICO - SISTEMA DE VIDEO AUTOMÁTICO
 # ==============================================================================
-# VERSIÓN: 4.4.0 - MULTI-CLIP PEXELS + GITHUB S3 CDN (ANTI-BLOQUEOS META)
+# VERSIÓN: 4.4.1 - MULTI-CLIP PEXELS + GITHUB S3 CDN + PYTORCH CPU LITE
 # ==============================================================================
 
 name: "Dato Critico - Pipeline Nuclear v3.0"
@@ -58,7 +58,7 @@ jobs:
           fetch-depth: 1
 
       - name: "🛠️ Instalar dependencias del sistema"
-        timeout-minutes: 8
+        timeout-minutes: 15
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
@@ -91,12 +91,17 @@ jobs:
           echo "✅ Fuente configurada: $(cat $GITHUB_ENV | grep FONT_NAME)"
 
           echo ""
-          echo "🐍 Instalando dependencias de Python (Forzado)..."
+          echo "🐍 Instalando dependencias de Python (Forzado GPU Lite)..."
 
           python3 -m pip install --upgrade pip --break-system-packages || python3 -m pip install --upgrade pip
+          
+          # SOLUCIÓN DEL TIMEOUT: Forzamos la descarga de la versión CPU de PyTorch antes del Whisper
+          python3 -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --break-system-packages || python3 -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+          
+          # Instalamos el resto con normalidad
           python3 -m pip install openai-whisper edge-tts requests gtts google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client numpy tqdm --break-system-packages || python3 -m pip install openai-whisper edge-tts requests gtts google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client numpy tqdm
 
-          echo "✅ Dependencias Python instaladas"
+          echo "✅ Dependencias Python instaladas correctamente en versión ligera"
 
       - name: "📝 Extraer y sanear textos UTF-8"
         id: extraer
