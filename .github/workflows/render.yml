@@ -1,7 +1,7 @@
 # ==============================================================================
-# 🚀 PIPELINE NUCLEAR v4.4.1 - DATO CRÍTICO - SISTEMA DE VIDEO AUTOMÁTICO
+# 🚀 PIPELINE NUCLEAR v4.4.2 - DATO CRÍTICO - SISTEMA DE VIDEO AUTOMÁTICO
 # ==============================================================================
-# VERSIÓN: 4.4.1 - MULTI-CLIP PEXELS + GITHUB S3 CDN + PYTORCH CPU LITE
+# VERSIÓN: 4.4.2 - TIKTOK VÍA MAKE/ZAPIER/BUFFER (S3 CDN)
 # ==============================================================================
 
 name: "Dato Critico - Pipeline Nuclear v3.0"
@@ -141,7 +141,6 @@ jobs:
               if not text or len(text.strip()) < 3: return default_value
               return text.strip()[:max_length]
 
-          # CORRECCIÓN: Filtro "Antierrores" para los nombres técnicos
           def aplicar_diccionario(text):
               if not text: return text
               diccionario = {
@@ -154,7 +153,6 @@ jobs:
                   text = text.replace(err, corr)
               return text
 
-          # Aplicamos limpieza + filtro de diccionario a los textos
           titulo_limpio = clean_invisible_chars(repair_encoding(os.environ.get('TITULO_RAW', '')))
           titulo = validate_and_limit(aplicar_diccionario(titulo_limpio), 100, "🚀 Noticia Tech del Momento")
 
@@ -213,7 +211,6 @@ jobs:
                               links.append(f['link'])
                               break
                   
-                  # Descargamos hasta 4 clips distintos
                   for i, link in enumerate(links[:4]):
                       print(f"📥 Descargando clip {i+1}...")
                       r = requests.get(link, timeout=30)
@@ -225,7 +222,6 @@ jobs:
               except Exception as e:
                   print(f"❌ Error buscando en Pexels: {e}")
 
-          # Si falla la API de Pexels, intentamos usar el video de Activepieces (fallback)
           if not downloaded_files and fallback_url and fallback_url != 'null':
               print("⚠️ Usando video de fallback de Activepieces...")
               try:
@@ -245,7 +241,6 @@ jobs:
               with open("concat_list.txt", "w") as f:
                   for i, clip in enumerate(downloaded_files):
                       out_name = f"norm_{i}.mp4"
-                      # Escalar, recortar a vertical y forzar 30 fps para evitar errores de Meta
                       cmd = f'ffmpeg -y -i {clip} -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30" -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -an {out_name} 2>/dev/null'
                       os.system(cmd)
                       f.write(f"file '{out_name}'\n")
@@ -272,13 +267,10 @@ jobs:
 
           if [ "$AUDIO_OK" = "false" ]; then ffmpeg -y -f lavfi -i "sine=frequency=440:duration=30" -c:a libmp3lame -b:a 128k audio.mp3 2>/dev/null || true; fi
           
-          # Convertimos primero la voz sola a wav
           ffmpeg -y -i audio.mp3 -acodec pcm_s16le -ar 44100 -ac 1 audio_voz.wav 2>/dev/null
           
-          # CORRECCIÓN: Mezcla de música de fondo (requiere que tengas musica_tension.mp3 en el root de GitHub)
           if [ -f "musica_tension.mp3" ]; then
             echo "🎵 Mezclando voz con música de tensión..."
-            # Mezclamos la voz con la música en bucle al 8% de volumen
             ffmpeg -y -i audio_voz.wav -stream_loop -1 -i musica_tension.mp3 -filter_complex "[1:a]volume=0.08[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[a]" -map "[a]" -acodec pcm_s16le -ar 44100 -ac 1 audio.wav 2>/dev/null
           else
             echo "⚠️ No se encontró 'musica_tension.mp3' en el repositorio. Usando solo la voz."
@@ -492,92 +484,67 @@ jobs:
           PYTHON_YOUTUBE
           if python3 /tmp/subir_youtube.py; then echo "youtube_status=✅ YouTube OK" >> $GITHUB_OUTPUT; else echo "youtube_status=❌ YouTube Falló" >> $GITHUB_OUTPUT; fi
 
-      - name: "🎵 Publicar en TikTok"
+      - name: "🎵 Publicar en TikTok (Vía Make/Zapier/Buffer)"
         id: tiktok
         continue-on-error: true
-        timeout-minutes: 10
+        timeout-minutes: 5
         env:
-          TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
-          TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
-          TIKTOK_REFRESH_TOKEN: ${{ secrets.TIKTOK_REFRESH_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_NAME: ${{ github.repository }}
         run: |
-          cat << 'PYTHON_TIKTOK' > /tmp/subir_tiktok.py
-          import os
-          import sys
-          import time
-          import subprocess
-          import requests
-          import traceback
-
+          echo "☁️ Subiendo video a S3 VIP para que Make pueda descargarlo..."
+          gh release view ig-cdn >/dev/null 2>&1 || gh release create ig-cdn --title "IG CDN" --notes "Almacenamiento temporal VIP para Meta y TikTok"
+          gh release upload ig-cdn output.mp4 --clobber
+          
+          VIDEO_PUBLIC_URL="https://github.com/${REPO_NAME}/releases/download/ig-cdn/output.mp4"
+          echo "✅ URL pública del video generada: $VIDEO_PUBLIC_URL"
+          
+          cat << 'PYTHON_TIKTOK_MAKE' > /tmp/subir_tiktok_make.py
+          import os, sys, requests
           sys.stdout.reconfigure(encoding='utf-8')
 
-          try:
-              client_key = os.environ.get('TIKTOK_CLIENT_KEY', '')
-              client_secret = os.environ.get('TIKTOK_CLIENT_SECRET', '')
-              refresh_token = os.environ.get('TIKTOK_REFRESH_TOKEN', '')
-              
-              if not all([client_key, client_secret, refresh_token]): 
-                  print("❌ Error: Faltan credenciales de TikTok en los Secrets.")
-                  sys.exit(1)
-
-              print("Obteniendo Token de TikTok...")
-              token_response = requests.post("https://open.tiktokapis.com/v2/oauth/token/", data={"client_key": client_key, "client_secret": client_secret, "grant_type": "refresh_token", "refresh_token": refresh_token}, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=30)
-              
-              if token_response.status_code != 200: 
-                  print(f"❌ Error de autenticación HTTP {token_response.status_code}: {token_response.text}")
-                  sys.exit(1)
-              
-              token_data = token_response.json()
-              access_token = token_data['data'].get('access_token', '')
-              new_refresh_token = token_data['data'].get('refresh_token', refresh_token)
-              
-              if new_refresh_token != refresh_token: 
-                  subprocess.run(["gh", "secret", "set", "TIKTOK_REFRESH_TOKEN", "-b", new_refresh_token], check=False, capture_output=True)
-
-              titulo = open('titulo.txt', 'r', encoding='utf-8').read().strip()[:100]
-              video_size = os.path.getsize('output.mp4')
-
-              print("Inicializando subida a TikTok...")
-              init_response = requests.post("https://open.tiktokapis.com/v2/post/publish/video/init/", headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json; charset=UTF-8"}, json={"post_info": {"title": titulo, "privacy_level": "PUBLIC_TO_EVERYONE", "disable_duet": False, "disable_comment": False, "disable_stitch": False}, "source_info": {"source": "FILE_UPLOAD", "video_size": video_size, "chunk_size": video_size, "total_chunk_count": 1}}, timeout=30)
-              
-              if init_response.status_code != 200: 
-                  print(f"❌ Inicialización falló: {init_response.text}")
-                  sys.exit(1)
-                  
-              init_data = init_response.json()
-              publish_id = init_data['data']['publish_id']
-              upload_url = init_data['data']['upload_url']
-
-              print(f"📤 Subiendo archivo de video a TikTok...")
-              with open('output.mp4', 'rb') as video_file:
-                  upload_response = requests.put(upload_url, headers={"Content-Type": "video/mp4", "Content-Range": f"bytes 0-{video_size - 1}/{video_size}", "Content-Length": str(video_size)}, data=video_file.read(), timeout=300)
-              
-              if upload_response.status_code not in [200, 201, 206]: 
-                  print(f"❌ La subida final falló. Status {upload_response.status_code}: {upload_response.text}")
-                  sys.exit(1)
-
-              print("⏳ Verificando estado de procesamiento en TikTok...")
-              for attempt in range(8):
-                  time.sleep(15)
-                  check_response = requests.post("https://open.tiktokapis.com/v2/post/publish/status/fetch/", headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json; charset=UTF-8"}, json={"publish_id": publish_id}, timeout=30)
-                  status = check_response.json().get('data', {}).get('status', 'UNKNOWN')
-                  print(f"   Estado actual: {status}")
-                  
-                  if status == 'PUBLISH_COMPLETE': 
-                      print("\n✅ VIDEO PUBLICADO EN TIKTOK")
-                      sys.exit(0)
-                  elif status in ['FAILED', 'ERROR']: 
-                      print(f"❌ TikTok rechazó el video. JSON: {check_response.text}")
-                      sys.exit(1)
-                      
-              print("⚠️ Timeout esperando a TikTok. Puede que se suba más tarde.")
-          except Exception as e: 
-              print("\n❌ ERROR GENERAL TIKTOK:")
-              traceback.print_exc()
+          # ==============================================================================
+          # WEBHOOK DE MAKE INYECTADO:
+          webhook_url = "https://hook.eu1.make.com/khybibeyd846rrhtpsdsoo4ty7lyyl8e"
+          # ==============================================================================
+          
+          if not webhook_url or webhook_url == "TU_URL_DE_MAKE_AQUI":
+              print("❌ Error: Tienes que pegar tu URL de Make en el código (variable webhook_url).")
               sys.exit(1)
-          PYTHON_TIKTOK
-          if python3 /tmp/subir_tiktok.py; then echo "tiktok_status=✅ TikTok OK" >> $GITHUB_OUTPUT; else echo "tiktok_status=❌ TikTok Falló" >> $GITHUB_OUTPUT; fi
+
+          video_url = os.environ.get('VIDEO_PUBLIC_URL', '')
+          
+          try:
+              titulo = open('titulo.txt', 'r', encoding='utf-8').read().strip()
+          except:
+              titulo = "Nuevo Video"
+
+          payload = {
+              "titulo": titulo,
+              "video_url": video_url
+          }
+
+          print(f"🚀 Enviando datos a Make: {titulo}")
+          try:
+              response = requests.post(webhook_url, json=payload, timeout=30)
+              if response.status_code in [200, 201, 202]:
+                  print("✅ Datos enviados a Make correctamente.")
+                  sys.exit(0)
+              else:
+                  print(f"❌ Error de Make: HTTP {response.status_code}")
+                  print(response.text)
+                  sys.exit(1)
+          except Exception as e:
+              print(f"❌ Error de red conectando con Make: {e}")
+              sys.exit(1)
+          PYTHON_TIKTOK_MAKE
+          
+          export VIDEO_PUBLIC_URL=$VIDEO_PUBLIC_URL
+          if python3 /tmp/subir_tiktok_make.py; then 
+            echo "tiktok_status=✅ TikTok (Make) OK" >> $GITHUB_OUTPUT
+          else 
+            echo "tiktok_status=❌ TikTok (Make) Falló" >> $GITHUB_OUTPUT
+          fi
 
       - name: "📷 Publicar en Instagram (GitHub S3 CDN VIP)"
         id: instagram
