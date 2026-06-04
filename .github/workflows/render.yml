@@ -528,12 +528,19 @@ jobs:
           except:
               titulo = "Nuevo Video"
 
+          try:
+              descripcion = open('descripcion.txt', 'r', encoding='utf-8').read().strip()
+          except:
+              descripcion = ""
+
+          titulo_final = f"{titulo}\n\n{descripcion}".strip()
+
           payload = {
-              "titulo": titulo,
+              "titulo": titulo_final,
               "video_url": video_url
           }
 
-          print(f"🚀 Enviando datos a Make: {titulo}")
+          print(f"🚀 Enviando datos a Make: {titulo_final[:30]}...")
           try:
               response = requests.post(webhook_url, json=payload, timeout=30)
               if response.status_code in [200, 201, 202]:
