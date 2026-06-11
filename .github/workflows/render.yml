@@ -1,7 +1,7 @@
 # ==============================================================================
-# 🚀 PIPELINE NUCLEAR v4.4.2 - DOBLE FILO - SISTEMA DE VIDEO AUTOMÁTICO
+# 🚀 PIPELINE NUCLEAR v4.4.3 - DOBLE FILO - SISTEMA DE VIDEO AUTOMÁTICO
 # ==============================================================================
-# VERSIÓN: 4.4.2 - TIKTOK VÍA MAKE/ZAPIER/BUFFER (S3 CDN) + FB + DAILYMOTION
+# VERSIÓN: 4.4.3 - ESTERILIZACIÓN DE AUDIO + FB + DAILYMOTION + MAKE
 # ==============================================================================
 
 name: "Doble Filo - Pipeline Nuclear v3.0"
@@ -68,7 +68,6 @@ jobs:
 
           sudo apt-get update -qq 2>&1 | tail -5 || true
 
-          # CORRECCIÓN: Instalación desatendida y sin paquetes recomendados
           sudo apt-get install -yq --no-install-recommends \
             ffmpeg bc file wget curl fonts-liberation libnss3 libatk-bridge2.0-0 libgbm1 fontconfig \
             2>&1 | grep -E "(error|Error|ERROR)" || true
@@ -95,15 +94,13 @@ jobs:
 
           python3 -m pip install --upgrade pip --break-system-packages || python3 -m pip install --upgrade pip
           
-          # SOLUCIÓN DEL TIMEOUT: Forzamos la descarga de la versión CPU de PyTorch antes del Whisper
           python3 -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu --break-system-packages || python3 -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
           
-          # Instalamos el resto con normalidad
           python3 -m pip install openai-whisper edge-tts requests gtts google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client numpy tqdm --break-system-packages || python3 -m pip install openai-whisper edge-tts requests gtts google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client numpy tqdm
 
           echo "✅ Dependencias Python instaladas correctamente en versión ligera"
 
-      - name: "📝 Extraer y sanear textos UTF-8"
+      - name: "📝 Extraer y sanear textos UTF-8 (Limpieza Profunda)"
         id: extraer
         timeout-minutes: 2
         env:
@@ -137,6 +134,20 @@ jobs:
               text = re.sub(r' {2,}', ' ', text)
               return re.sub(r'\n{3,}', '\n\n', text).strip()
 
+          def sanitize_for_audio(text):
+              if not text: return ''
+              # Se eliminan símbolos visuales que traban al bot de voz
+              t = re.sub(r'[\*\"\'\«\»\(\)\[\]\{\}\#\_\|\~]', '', text)
+              # Solo dejamos letras, números y puntuación necesaria para las pausas
+              t = re.sub(r'[^\w\s\.,;:\?!¡¿áéíóúÁÉÍÓÚñÑüÜ\-]', '', t)
+              return re.sub(r' {2,}', ' ', t).strip()
+
+          def clean_title(text):
+              if not text: return ''
+              # Limpieza agresiva de comillas y asteriscos para títulos limpios
+              t = re.sub(r'[\*\"\'\«\»\_\|\~]', '', text)
+              return re.sub(r' {2,}', ' ', t).strip()
+
           def validate_and_limit(text, max_length, default_value):
               if not text or len(text.strip()) < 3: return default_value
               return text.strip()[:max_length]
@@ -153,27 +164,37 @@ jobs:
                   text = text.replace(err, corr)
               return text
 
-          titulo_limpio = clean_invisible_chars(repair_encoding(os.environ.get('TITULO_RAW', '')))
-          titulo = validate_and_limit(aplicar_diccionario(titulo_limpio), 100, "🚀 Noticia Tech del Momento")
+          # 1. Procesar y limpiar Título
+          titulo_base = clean_invisible_chars(repair_encoding(os.environ.get('TITULO_RAW', '')))
+          titulo_limpio = clean_title(aplicar_diccionario(titulo_base))
+          titulo = validate_and_limit(titulo_limpio, 100, "🚀 Noticia Tech del Momento")
 
+          # 2. Procesar Descripción
           desc_limpia = clean_invisible_chars(repair_encoding(os.environ.get('DESCRIPCION_RAW', '')))
           descripcion = validate_and_limit(aplicar_diccionario(desc_limpia), 5000, "#tech #noticias #shorts")
 
-          script_limpio = clean_invisible_chars(repair_encoding(os.environ.get('SCRIPT_RAW', '')))
-          script_text = validate_and_limit(aplicar_diccionario(script_limpio), 5000, "Esto cambia todo lo que conocías. Sigue viendo.")
+          # 3. Procesar Guion Visual (Para los subtítulos, mantiene asteriscos)
+          script_base = clean_invisible_chars(repair_encoding(os.environ.get('SCRIPT_RAW', '')))
+          script_text = validate_and_limit(aplicar_diccionario(script_base), 5000, "Esto cambia todo lo que conocías. Sigue viendo.")
+          
+          # 4. Procesar Guion de Audio (Esterilizado para que la voz no se trabe)
+          script_audio = sanitize_for_audio(script_text)
 
+          # Guardar archivos
           with open('titulo.txt', 'w', encoding='utf-8') as f: f.write(titulo)
           with open('descripcion.txt', 'w', encoding='utf-8') as f: f.write(descripcion)
           with open('script.txt', 'w', encoding='utf-8') as f: f.write(script_text)
+          with open('script_audio.txt', 'w', encoding='utf-8') as f: f.write(script_audio)
           with open('titulo_corto.txt', 'w', encoding='utf-8') as f: f.write(titulo[:50])
-          print("✅ EXTRACCIÓN Y FILTRADO COMPLETADO")
+          
+          print("✅ EXTRACCIÓN Y ESTERILIZACIÓN DE TEXTOS COMPLETADA")
           PYTHON_EXTRAER
 
           python3 /tmp/extraer_textos.py
           TITULO_CORTO=$(python3 -c "print(open('titulo_corto.txt', encoding='utf-8').read().strip())" 2>/dev/null || echo "Video sin título")
           echo "titulo_corto=${TITULO_CORTO}" >> $GITHUB_OUTPUT
 
-      - name: "🎙️ Descargar MULTI-CLIP y generar audio"
+      - name: "🎙️ Descargar MULTI-CLIP y generar audio (Voz Fluida)"
         id: audio_gen
         timeout-minutes: 12
         env:
@@ -251,16 +272,17 @@ jobs:
 
           python3 /tmp/bajar_clips.py
 
+          # Usamos script_audio.txt esterilizado para generar la voz
           AUDIO_OK=false
-          edge-tts --voice "es-ES-AlvaroNeural" --rate="+5%" --pitch="-3Hz" --file script.txt --write-media audio_attempt1.mp3 2>/dev/null || true
+          edge-tts --voice "es-ES-AlvaroNeural" --rate="+5%" --pitch="-3Hz" --file script_audio.txt --write-media audio_attempt1.mp3 2>/dev/null || true
           if [ "$(stat -c%s audio_attempt1.mp3 2>/dev/null || echo 0)" -gt 5000 ]; then
             cp audio_attempt1.mp3 audio.mp3; AUDIO_OK=true
           else
-            edge-tts --voice "es-ES-JorgeNeural" --rate="+5%" --file script.txt --write-media audio_attempt2.mp3 2>/dev/null || true
+            edge-tts --voice "es-ES-JorgeNeural" --rate="+5%" --file script_audio.txt --write-media audio_attempt2.mp3 2>/dev/null || true
             if [ "$(stat -c%s audio_attempt2.mp3 2>/dev/null || echo 0)" -gt 5000 ]; then
               cp audio_attempt2.mp3 audio.mp3; AUDIO_OK=true
             else
-              python3 -c "from gtts import gTTS; gTTS(text=open('script.txt', encoding='utf-8').read().strip(), lang='es').save('audio_attempt3.mp3')" 2>/dev/null || true
+              python3 -c "from gtts import gTTS; gTTS(text=open('script_audio.txt', encoding='utf-8').read().strip(), lang='es').save('audio_attempt3.mp3')" 2>/dev/null || true
               if [ "$(stat -c%s audio_attempt3.mp3 2>/dev/null || echo 0)" -gt 5000 ]; then cp audio_attempt3.mp3 audio.mp3; AUDIO_OK=true; fi
             fi
           fi
@@ -305,6 +327,7 @@ jobs:
           sys.stdout.reconfigure(encoding='utf-8')
 
           try:
+              # Usamos el script_txt original (con asteriscos) para detectar las palabras clave en rojo
               original_script = open('script.txt', encoding='utf-8').read()
               red_words = [re.sub(r'[^\w\s]', '', w.strip('*').upper()) for w in original_script.split() if w.startswith('*') and w.endswith('*')]
           except:
@@ -493,7 +516,7 @@ jobs:
           PYTHON_YOUTUBE
           if python3 /tmp/subir_youtube.py; then echo "youtube_status=✅ YouTube OK" >> $GITHUB_OUTPUT; else echo "youtube_status=❌ YouTube Falló" >> $GITHUB_OUTPUT; fi
 
-      - name: "🎵 Publicar en TikTok (Vía Make/Zapier/Buffer)"
+      - name: "🎵 Publicar en TikTok (Vía Make)"
         id: tiktok
         continue-on-error: true
         timeout-minutes: 5
@@ -502,7 +525,7 @@ jobs:
           REPO_NAME: ${{ github.repository }}
         run: |
           echo "☁️ Subiendo video a S3 VIP para que Make pueda descargarlo..."
-          gh release view ig-cdn >/dev/null 2>&1 || gh release create ig-cdn --title "IG CDN" --notes "Almacenamiento temporal VIP para Meta y TikTok"
+          gh release view ig-cdn >/dev/null 2>&1 || gh release create ig-cdn --title "IG CDN" --notes "Almacenamiento temporal VIP"
           gh release upload ig-cdn output.mp4 --clobber
           
           VIDEO_PUBLIC_URL="https://github.com/${REPO_NAME}/releases/download/ig-cdn/output.mp4"
@@ -512,10 +535,7 @@ jobs:
           import os, sys, requests
           sys.stdout.reconfigure(encoding='utf-8')
 
-          # ==============================================================================
-          # WEBHOOK DE MAKE INYECTADO:
           webhook_url = "https://hook.eu1.make.com/khybibeyd846rrhtpsdsoo4ty7lyyl8e"
-          # ==============================================================================
           
           if not webhook_url or webhook_url == "TU_URL_DE_MAKE_AQUI":
               print("❌ Error: Tienes que pegar tu URL de Make en el código (variable webhook_url).")
@@ -525,12 +545,9 @@ jobs:
           
           try:
               titulo = open('titulo.txt', 'r', encoding='utf-8').read().strip()
-          except:
-              titulo = "Nuevo Video"
-
-          try:
               descripcion = open('descripcion.txt', 'r', encoding='utf-8').read().strip()
           except:
+              titulo = "Nuevo Video"
               descripcion = ""
 
           titulo_final = f"{titulo}\n\n{descripcion}".strip()
@@ -551,7 +568,7 @@ jobs:
                   print(response.text)
                   sys.exit(1)
           except Exception as e:
-              print(f"❌ Error de red conectando con Make: {e}")
+              print(f"❌ Error conectando con Make: {e}")
               sys.exit(1)
           PYTHON_TIKTOK_MAKE
           
@@ -562,7 +579,7 @@ jobs:
             echo "tiktok_status=❌ TikTok (Make) Falló" >> $GITHUB_OUTPUT
           fi
 
-      - name: "📷 Publicar en Instagram (GitHub S3 CDN VIP)"
+      - name: "📷 Publicar en Instagram (S3 CDN VIP)"
         id: instagram
         continue-on-error: true
         timeout-minutes: 12
@@ -572,25 +589,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO_NAME: ${{ github.repository }}
         run: |
-          echo "☁️ Subiendo video a GitHub Releases (Servidor S3 VIP anti-bloqueos)..."
-          
-          # Crear release temporal si no existe
+          echo "☁️ Usando release temporal en GitHub..."
           gh release view ig-cdn >/dev/null 2>&1 || gh release create ig-cdn --title "IG CDN" --notes "Almacenamiento temporal VIP para Meta"
-          
-          # Subir el video sobreescribiendo el anterior (para no ocupar espacio extra)
           gh release upload ig-cdn output.mp4 --clobber
           
-          # Construir la URL de descarga directa de Amazon S3
           VIDEO_PUBLIC_URL="https://github.com/${REPO_NAME}/releases/download/ig-cdn/output.mp4"
-          echo "✅ URL generada: $VIDEO_PUBLIC_URL"
           
           cat << 'PYTHON_INSTAGRAM' > /tmp/subir_instagram.py
-          import os
-          import sys
-          import time
-          import requests
-          import traceback
-
+          import os, sys, time, requests, traceback
           sys.stdout.reconfigure(encoding='utf-8')
 
           try:
@@ -653,7 +659,7 @@ jobs:
           page_id = "61575481445203"
 
           if not token:
-              print("⚠️ Falta el token de Meta (Instagram). Saltando Facebook...")
+              print("⚠️ Falta el token de Meta. Saltando Facebook...")
               sys.exit(0)
 
           try:
@@ -673,28 +679,19 @@ jobs:
                   print(f"❌ Error al inicializar: {res_init}")
                   sys.exit(1)
                   
-              print("⬆️ Subiendo archivo MP4 a los servidores de Meta...")
+              print("⬆️ Subiendo archivo MP4 a Meta...")
               headers = {"Authorization": f"OAuth {token}", "offset": "0"}
-              with open("output.mp4", "rb") as f:
-                  video_data = f.read()
+              with open("output.mp4", "rb") as f: video_data = f.read()
               headers["file_size"] = str(len(video_data))
               
-              res_upload = requests.post(upload_url, headers=headers, data=video_data)
+              requests.post(upload_url, headers=headers, data=video_data)
               
               print("📝 Publicando el Reel en tu página...")
-              pub_data = {
-                  "upload_phase": "finish",
-                  "video_id": video_id,
-                  "video_state": "PUBLISHED",
-                  "description": texto_completo,
-                  "access_token": token
-              }
+              pub_data = {"upload_phase": "finish", "video_id": video_id, "video_state": "PUBLISHED", "description": texto_completo, "access_token": token}
               res_pub = requests.post(url_init, data=pub_data).json()
               
-              if res_pub.get("success"):
-                  print("✅ Facebook Reels OK.")
-              else:
-                  print(f"❌ Error al publicar: {res_pub}")
+              if res_pub.get("success"): print("✅ Facebook Reels OK.")
+              else: print(f"❌ Error al publicar: {res_pub}")
           except Exception as e:
               print(f"❌ Error interno en Facebook: {e}")
               sys.exit(1)
@@ -726,49 +723,21 @@ jobs:
               titulo = open('titulo.txt', 'r', encoding='utf-8').read().strip()[:255]
               descripcion = open('descripcion.txt', 'r', encoding='utf-8').read().strip()[:3000]
               
-              print("🔑 Autenticando en Dailymotion...")
-              auth_resp = requests.post('https://api.dailymotion.com/oauth/token', data={
-                  'grant_type': 'password',
-                  'client_id': client_id,
-                  'client_secret': client_secret,
-                  'username': username,
-                  'password': password,
-                  'scope': 'manage_videos'
-              }).json()
-              
+              auth_resp = requests.post('https://api.dailymotion.com/oauth/token', data={'grant_type': 'password', 'client_id': client_id, 'client_secret': client_secret, 'username': username, 'password': password, 'scope': 'manage_videos'}).json()
               token = auth_resp.get('access_token')
-              if not token:
-                  print(f"❌ Error de autenticación en Dailymotion: {auth_resp}")
-                  sys.exit(1)
+              
+              if not token: sys.exit(1)
                   
               headers = {'Authorization': f'Bearer {token}'}
+              upload_url = requests.get('https://api.dailymotion.com/file/upload', headers=headers).json().get('upload_url')
               
-              print("🌐 Solicitando servidor de subida...")
-              upload_server = requests.get('https://api.dailymotion.com/file/upload', headers=headers).json()
-              upload_url = upload_server.get('upload_url')
+              with open('output.mp4', 'rb') as f: video_url = requests.post(upload_url, files={'file': f}).json().get('url')
               
-              print("⬆️ Subiendo archivo MP4...")
-              with open('output.mp4', 'rb') as f:
-                  upload_resp = requests.post(upload_url, files={'file': f}).json()
-                  
-              video_url = upload_resp.get('url')
+              publish_resp = requests.post('https://api.dailymotion.com/me/videos', headers=headers, data={'url': video_url, 'title': titulo, 'description': descripcion, 'channel': 'news', 'published': 'true', 'private': 'false'}).json()
               
-              print("📝 Publicando vídeo...")
-              publish_resp = requests.post('https://api.dailymotion.com/me/videos', headers=headers, data={
-                  'url': video_url,
-                  'title': titulo,
-                  'description': descripcion,
-                  'channel': 'news',
-                  'published': 'true',
-                  'private': 'false'
-              }).json()
-              
-              if publish_resp.get('id'):
-                  print(f"✅ Dailymotion OK: https://www.dailymotion.com/video/{publish_resp.get('id')}")
-              else:
-                  print(f"❌ Error al publicar en Dailymotion: {publish_resp}")
+              if publish_resp.get('id'): print(f"✅ Dailymotion OK: https://www.dailymotion.com/video/{publish_resp.get('id')}")
           except Exception as e:
-              print(f"❌ Error interno en Dailymotion: {e}")
+              print(f"❌ Error en Dailymotion: {e}")
               sys.exit(1)
           PYTHON_DAILYMOTION
           
@@ -784,10 +753,10 @@ jobs:
             subtitles.ass
             audio.json
             ffmpeg_output.log
-            ffmpeg_report.log
             titulo.txt
             descripcion.txt
             script.txt
+            script_audio.txt
           retention-days: 7
           if-no-files-found: warn
 
